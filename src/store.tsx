@@ -1,10 +1,12 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useReducer,
   type Dispatch,
   type ReactNode,
 } from "react";
+import { backend } from "./lib/api";
 import type {
   LinkStatus,
   Peer,
@@ -106,4 +108,15 @@ export function useStore() {
   const c = useContext(Ctx);
   if (!c) throw new Error("useStore outside provider");
   return c;
+}
+
+/** Reset the UI *and* stop any in-flight backend session (unblocks the
+ *  receiver's accept loop, ends transfers, stops the beacon). Use for every
+ *  "Start over" so the backend doesn't stay stuck listening. */
+export function useReset() {
+  const { dispatch } = useStore();
+  return useCallback(() => {
+    backend.cancel().catch(() => {});
+    dispatch({ t: "reset" });
+  }, [dispatch]);
 }

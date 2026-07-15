@@ -1,8 +1,9 @@
-import { useStore } from "../store";
+import { useStore, useReset } from "../store";
 import { bytes, count } from "../lib/format";
 
 export default function DoneStep() {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
+  const reset = useReset();
   const p = state.progress;
   const sending = state.role === "send";
 
@@ -31,7 +32,7 @@ export default function DoneStep() {
       </div>
 
       <div className="actions">
-        <button className="btn" onClick={() => dispatch({ t: "reset" })}>
+        <button className="btn" onClick={reset}>
           Transfer something else
         </button>
       </div>

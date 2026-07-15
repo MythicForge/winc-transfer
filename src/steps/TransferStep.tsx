@@ -1,9 +1,10 @@
-import { useStore } from "../store";
+import { useStore, useReset } from "../store";
 import { backend } from "../lib/api";
 import { bytes, count, eta, rate } from "../lib/format";
 
 export default function TransferStep() {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
+  const reset = useReset();
   const p = state.progress;
   const pct = p.bytesTotal > 0 ? Math.min(100, (p.bytesSent / p.bytesTotal) * 100) : 0;
   const sending = state.role === "send";
@@ -59,7 +60,7 @@ export default function TransferStep() {
             Stop transfer
           </button>
         ) : (
-          <button className="btn btn--ghost" onClick={() => dispatch({ t: "reset" })}>
+          <button className="btn btn--ghost" onClick={reset}>
             ← Start over
           </button>
         )}

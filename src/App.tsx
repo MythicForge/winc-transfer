@@ -1,4 +1,4 @@
-import { useStore } from "./store";
+import { useStore, useReset } from "./store";
 import { MOCK } from "./lib/api";
 import Cable from "./components/Cable";
 import StepRail from "./components/StepRail";
@@ -28,7 +28,8 @@ function StepView() {
 }
 
 export default function App() {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
+  const reset = useReset();
 
   return (
     <div className="app">
@@ -40,7 +41,7 @@ export default function App() {
           <span className="brand__tag">Direct cable crossing</span>
         </div>
         {state.role && (
-          <button className="btn btn--ghost" onClick={() => dispatch({ t: "reset" })}>
+          <button className="btn btn--ghost" onClick={reset}>
             Start over
           </button>
         )}

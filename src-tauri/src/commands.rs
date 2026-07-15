@@ -45,6 +45,13 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
 
 #[tauri::command]
 pub fn start_receiver(name: String, state: State<'_, Session>) -> Result<ReceiverInfo, String> {
+    // clear any leftover state from a previous "Start over"
+    state.cancel.store(false, Ordering::Relaxed);
+    if let Some(stop) = state.beacon_stop.lock().unwrap().take() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    *state.listener.lock().unwrap() = None;
+
     // fresh pairing code
     let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
     let digits = format!("{:06}", n);
@@ -133,8 +140,10 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
         .take()
         .ok_or("receiver not started")?;
     let code = state.code.lock().unwrap().clone().unwrap_or_default();
+    let cancel = state.cancel.clone();
 
-    let (stream, peer) = net::accept_and_verify(&listener, &code).map_err(|e| e.to_string())?;
+    let (stream, peer) =
+        net::accept_and_verify(&listener, &code, &cancel).map_err(|e| e.to_string())?;
     let _ = app.emit("winc://paired", &peer);
 
     // stop advertising once someone connected
@@ -145,7 +154,6 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
     let dest = incoming_dir();
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
 
-    let cancel = state.cancel.clone();
     let emit = emitter(&app);
     net::receive_files(&stream, &dest, &cancel, emit).map_err(|e| {
         let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
@@ -153,9 +161,15 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
     })
 }
 
+/// Stop whatever's in flight: unblocks the receiver's accept loop, ends any
+/// transfer, and stops the discovery beacon. Called on "Start over".
 #[tauri::command]
 pub fn cancel(state: State<'_, Session>) {
     state.cancel.store(true, Ordering::Relaxed);
+    if let Some(stop) = state.beacon_stop.lock().unwrap().take() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    *state.send_stream.lock().unwrap() = None;
 }
 
 fn incoming_dir() -> std::path::PathBuf {

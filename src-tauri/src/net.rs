@@ -90,21 +90,45 @@ fn local_ip() -> Option<Ipv4Addr> {
 /* ---------------- discovery ---------------- */
 
 /// RECEIVER: broadcast a beacon so the sender can find us. Runs until `stop`.
+///
+/// On a machine that's on Wi-Fi *and* the cable, a plain 255.255.255.255 broadcast
+/// egresses the default route (Wi-Fi), so the sender would learn our Wi-Fi IP and
+/// transfer over Wi-Fi. To keep it on the cable, we bind the socket to the cable's
+/// link-local IP and send to the link-local directed broadcast 169.254.255.255.
 pub fn run_beacon(name: String, tcp_port: u16, stop: Arc<AtomicBool>) {
-    let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+    let cable = local_ip();
+    let is_ll = cable.map(|i| i.octets()[0] == 169 && i.octets()[1] == 254).unwrap_or(false);
+    let bind_ip = cable.unwrap_or(Ipv4Addr::UNSPECIFIED);
+
+    let sock = match UdpSocket::bind((bind_ip, 0)).or_else(|_| UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))) {
         Ok(s) => s,
         Err(_) => return,
     };
     let _ = sock.set_broadcast(true);
+
+    let bcast = if is_ll {
+        Ipv4Addr::new(169, 254, 255, 255) // stays on the cable subnet
+    } else {
+        Ipv4Addr::BROADCAST // Wi-Fi/LAN fallback when there's no cable
+    };
     let beacon = Beacon {
         magic: PROTO_MAGIC.into(),
         name,
+        ip: cable.map(|i| i.to_string()).unwrap_or_default(),
         port: tcp_port,
     };
     let payload = serde_json::to_vec(&beacon).unwrap_or_default();
-    let target = SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT);
+    let mut targets = vec![SocketAddrV4::new(bcast, DISCOVERY_PORT)];
+    // Because the socket is bound to the cable IP, a 255.255.255.255 broadcast
+    // still egresses only the cable — a fallback for stacks that drop directed
+    // (169.254.255.255) broadcasts. It never leaks to Wi-Fi.
+    if is_ll {
+        targets.push(SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT));
+    }
     while !stop.load(Ordering::Relaxed) {
-        let _ = sock.send_to(&payload, target);
+        for t in &targets {
+            let _ = sock.send_to(&payload, t);
+        }
         std::thread::sleep(Duration::from_millis(800));
     }
 }
@@ -120,9 +144,12 @@ pub fn discover(timeout: Duration) -> Option<Peer> {
             Ok((n, SocketAddr::V4(src))) => {
                 if let Ok(b) = serde_json::from_slice::<Beacon>(&buf[..n]) {
                     if b.magic == PROTO_MAGIC {
+                        // prefer the cable IP the receiver advertised; fall back to
+                        // the packet source only if the beacon didn't carry one.
+                        let ip = if b.ip.is_empty() { src.ip().to_string() } else { b.ip };
                         return Some(Peer {
                             name: b.name,
-                            ip: src.ip().to_string(),
+                            ip,
                             port: b.port,
                         });
                     }
@@ -252,8 +279,27 @@ pub fn send_files<F: Fn(TransferProgress)>(
 /* ---------------- receiver side ---------------- */
 
 /// Accept one sender, verify the code, return the connection + peer identity.
-pub fn accept_and_verify(listener: &TcpListener, code: &str) -> io::Result<(TcpStream, Peer)> {
-    let (stream, addr) = listener.accept()?;
+/// Polls so a `cancel` (Start over) can break out of the wait instead of blocking forever.
+pub fn accept_and_verify(
+    listener: &TcpListener,
+    code: &str,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<(TcpStream, Peer)> {
+    listener.set_nonblocking(true)?;
+    let (stream, addr) = loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        match listener.accept() {
+            Ok(pair) => break pair,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(120));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    stream.set_nonblocking(false)?; // blocking again for the transfer
     stream.set_nodelay(true).ok();
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream.try_clone()?);

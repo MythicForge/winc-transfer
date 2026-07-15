@@ -115,6 +115,7 @@ pub struct FileEntry {
 pub struct Beacon {
     pub magic: String,
     pub name: String,
+    pub ip: String, // the receiver's cable IP, so the sender connects over the cable
     pub port: u16,
 }
 
