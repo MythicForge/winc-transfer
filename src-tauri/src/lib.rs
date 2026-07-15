@@ -22,6 +22,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_link_status,
+            commands::list_adapters,
             commands::start_receiver,
             commands::discover_peer,
             commands::list_local_ips,

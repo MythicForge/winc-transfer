@@ -37,6 +37,12 @@ pub fn get_link_status() -> LinkStatus {
     net::link_status()
 }
 
+/// All network adapters this PC sees, classified — for the connect-screen diagnostics.
+#[tauri::command]
+pub fn list_adapters() -> Vec<AdapterInfo> {
+    net::list_adapters()
+}
+
 #[tauri::command]
 pub fn start_receiver(name: String, state: State<'_, Session>) -> Result<ReceiverInfo, String> {
     // fresh pairing code

@@ -4,6 +4,7 @@
  * whole flow is drivable without two PCs. Detected via window.__TAURI_INTERNALS__.
  */
 import type {
+  AdapterInfo,
   LinkStatus,
   Peer,
   SourceGroup,
@@ -22,6 +23,8 @@ type PeerCb = (p: Peer) => void;
 export interface Backend {
   /** Poll/subscribe the direct-cable network link. */
   watchLink(cb: LinkCb): () => void;
+  /** All network adapters this PC sees, classified — for the connect diagnostics. */
+  listAdapters(): Promise<AdapterInfo[]>;
   /** RECEIVE side: open listener, return the 6-digit pairing code + our address. */
   startReceiver(name: string): Promise<{ code: string; peer: Peer }>;
   /** SEND side: look for a receiver beacon on the link-local subnet. */
@@ -58,10 +61,15 @@ function tauriBackend(): Backend {
 
   return {
     watchLink(cb) {
-      let un = () => {};
-      listen<LinkStatus>("winc://link", cb).then((u) => (un = u));
-      invoke<LinkStatus>("get_link_status").then(cb).catch(() => {});
-      return () => un();
+      // APIPA (169.254) can take several seconds to self-assign after the cable
+      // links, so poll — a one-shot check misses the cable and latches onto Wi-Fi.
+      const tick = () => invoke<LinkStatus>("get_link_status").then(cb).catch(() => {});
+      tick();
+      const id = setInterval(tick, 1500);
+      return () => clearInterval(id);
+    },
+    listAdapters() {
+      return invoke("list_adapters");
     },
     startReceiver(name) {
       return invoke("start_receiver", { name });
@@ -127,6 +135,13 @@ function mockBackend(): Backend {
         2600,
       );
       return () => clearTimeout(t);
+    },
+    async listAdapters() {
+      await sleep(150);
+      return [
+        { name: "Thunderbolt Bridge", ip: "169.254.42.7", linkLocal: true, cable: true, kind: "thunderbolt" as const },
+        { name: "Wi-Fi", ip: "192.168.1.24", linkLocal: false, cable: false, kind: "network" as const },
+      ];
     },
     async startReceiver() {
       await sleep(400);

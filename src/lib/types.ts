@@ -13,6 +13,14 @@ export type Peer = {
   port: number;
 };
 
+export type AdapterInfo = {
+  name: string;
+  ip: string;
+  linkLocal: boolean; // 169.254/16 APIPA — the direct-cable signature
+  cable: boolean;
+  kind: "thunderbolt" | "usb4" | "other" | "network";
+};
+
 /** A selectable group of data on the OLD pc. */
 export type SourceGroup = {
   id: string;

@@ -13,60 +13,78 @@ const BUF: usize = 256 * 1024;
 
 /* ---------------- link detection ---------------- */
 
-/// Look for the direct-cable adapter: a link-local (169.254/16) IPv4, or an
-/// interface whose name reads as Thunderbolt / USB4 / bridge.
-pub fn link_status() -> LinkStatus {
+/// Every non-loopback IPv4 adapter with a classification, for detection + UI.
+pub fn list_adapters() -> Vec<AdapterInfo> {
+    let mut out: Vec<AdapterInfo> = Vec::new();
     let ifaces = match if_addrs::get_if_addrs() {
         Ok(v) => v,
-        Err(_) => return LinkStatus::default(),
+        Err(_) => return out,
     };
-    let mut fallback: Option<LinkStatus> = None;
     for i in ifaces {
         if i.is_loopback() {
             continue;
         }
         let ip = match i.ip() {
             std::net::IpAddr::V4(v4) => v4,
-            _ => continue,
+            _ => continue, // IPv6 entries are listed separately by if-addrs; skip
         };
-        let name = i.name.clone();
-        let lname = name.to_lowercase();
-        let is_tb = lname.contains("thunderbolt");
-        let is_usb4 = lname.contains("usb4") || lname.contains("usb 4");
-        let is_bridge = lname.contains("bridge");
+        let lname = i.name.to_lowercase();
+        // Windows "Direct Cable Networking" (Thunderbolt/USB4 Net) has no DHCP, so
+        // it self-assigns an APIPA 169.254/16 address — that is the strongest signal.
         let link_local = ip.octets()[0] == 169 && ip.octets()[1] == 254;
-
-        if is_tb || is_usb4 || is_bridge || link_local {
-            let kind = if is_tb {
-                "thunderbolt"
-            } else if is_usb4 {
-                "usb4"
-            } else {
-                "other"
-            };
-            return LinkStatus {
-                up: true,
-                adapter: Some(name),
-                local_ip: Some(ip.to_string()),
-                kind: Some(kind.into()),
-            };
-        }
-        // remember a private address in case no obvious direct link is named
-        if fallback.is_none() && !ip.is_link_local() {
-            fallback = Some(LinkStatus {
-                up: false,
-                adapter: Some(name),
-                local_ip: Some(ip.to_string()),
-                kind: Some("other".into()),
-            });
-        }
+        let named_cable = lname.contains("thunderbolt")
+            || lname.contains("usb4")
+            || lname.contains("usb 4")
+            || lname.contains("bridge");
+        let kind = if lname.contains("thunderbolt") {
+            "thunderbolt"
+        } else if lname.contains("usb4") || lname.contains("usb 4") {
+            "usb4"
+        } else if link_local || named_cable {
+            "other"
+        } else {
+            "network"
+        };
+        out.push(AdapterInfo {
+            name: i.name.clone(),
+            ip: ip.to_string(),
+            link_local,
+            cable: link_local || named_cable,
+            kind: kind.into(),
+        });
     }
-    fallback.unwrap_or_default()
+    out
 }
 
+/// Pick the best direct-cable adapter. Priority: link-local (169.254) APIPA,
+/// then an adapter named like Thunderbolt/USB4/bridge. Wi-Fi/LAN never counts as
+/// "up" — a real network address must not be mistaken for the transfer cable.
+pub fn link_status() -> LinkStatus {
+    let adapters = list_adapters();
+    let pick = adapters
+        .iter()
+        .find(|a| a.link_local)
+        .or_else(|| adapters.iter().find(|a| a.cable));
+    match pick {
+        Some(a) => LinkStatus {
+            up: true,
+            adapter: Some(a.name.clone()),
+            local_ip: Some(a.ip.clone()),
+            kind: Some(a.kind.clone()),
+        },
+        None => LinkStatus::default(),
+    }
+}
+
+/// The IP to bind/advertise: cable first, else any usable address (for manual mode).
 fn local_ip() -> Option<Ipv4Addr> {
-    let s = link_status();
-    s.local_ip.and_then(|ip| ip.parse().ok())
+    let adapters = list_adapters();
+    let chosen = adapters
+        .iter()
+        .find(|a| a.link_local)
+        .or_else(|| adapters.iter().find(|a| a.cable))
+        .or_else(|| adapters.first());
+    chosen.and_then(|a| a.ip.parse().ok())
 }
 
 /* ---------------- discovery ---------------- */
@@ -350,24 +368,14 @@ pub fn advertised_ip() -> String {
 /// Every usable IPv4 on this PC, direct-cable link first — so a person doing
 /// manual IP entry can read out the right one.
 pub fn local_ipv4s() -> Vec<String> {
+    let mut adapters = list_adapters();
+    // cable/link-local first, then the rest, preserving order
+    adapters.sort_by_key(|a| if a.link_local { 0 } else if a.cable { 1 } else { 2 });
     let mut out: Vec<String> = Vec::new();
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for i in ifaces {
-            if i.is_loopback() {
-                continue;
-            }
-            if let std::net::IpAddr::V4(v4) = i.ip() {
-                let s = v4.to_string();
-                if !out.contains(&s) {
-                    out.push(s);
-                }
-            }
+    for a in adapters {
+        if !out.contains(&a.ip) {
+            out.push(a.ip);
         }
-    }
-    // put the detected direct-cable IP first
-    if let Some(primary) = local_ip().map(|i| i.to_string()) {
-        out.retain(|s| s != &primary);
-        out.insert(0, primary);
     }
     out
 }

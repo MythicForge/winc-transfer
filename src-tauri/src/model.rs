@@ -15,6 +15,17 @@ pub struct LinkStatus {
     pub kind: Option<String>,
 }
 
+/// One network adapter, classified — used for detection and the diagnostics list.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterInfo {
+    pub name: String,
+    pub ip: String,
+    pub link_local: bool, // 169.254/16 APIPA — the direct-cable signature
+    pub cable: bool,      // link_local or a Thunderbolt/USB4/bridge-named adapter
+    pub kind: String,     // "thunderbolt" | "usb4" | "other" | "network"
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Peer {
     pub name: String,

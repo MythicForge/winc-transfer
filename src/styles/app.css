@@ -532,6 +532,57 @@
 }
 .ipchip--primary { border-color: var(--copper); background: var(--copper-soft); }
 
+/* ---------- adapter diagnostics ---------- */
+.diag-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.adapters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.adapter {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+}
+.adapter--cable {
+  border-color: var(--copper);
+  background: var(--copper-soft);
+}
+.adapter__name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adapter__ip {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+}
+.adapter__tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--slate);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+.adapter__tag--cable {
+  color: var(--copper);
+  border-color: var(--copper);
+}
+
 /* ---------- transfer meters ---------- */
 .meters {
   display: grid;
