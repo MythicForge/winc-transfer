@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore, useReset } from "../store";
 import { backend } from "../lib/api";
 import { bytes, count } from "../lib/format";
-import type { ImportAction, ImportReport } from "../lib/types";
+import type { ImportAction, ImportEntry, ImportReport } from "../lib/types";
 
 const ACTION_BADGE: Record<ImportAction, { text: string; cls: string }> = {
   imported: { text: "✓ imported", cls: "import__badge--ok" },
@@ -19,7 +19,7 @@ export default function DoneStep() {
   const [report, setReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [overwriting, setOverwriting] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
 
   function runImport() {
     if (!state.receivedDir) return;
@@ -32,11 +32,16 @@ export default function DoneStep() {
       .finally(() => setBusy(false));
   }
 
-  function runOverwrite(label: string) {
-    if (!state.receivedDir || overwriting) return;
-    setOverwriting(label);
-    backend
-      .importBrowserOverwrite(state.receivedDir, label)
+  // Re-run one browser's import (Overwrite? or Open First) and swap its row in
+  // place with whatever the backend now reports.
+  function runBrowserAction(
+    label: string,
+    fn: (dir: string, label: string) => Promise<ImportEntry>,
+  ) {
+    if (!state.receivedDir || pending) return;
+    setPending(label);
+    setErr(null);
+    fn(state.receivedDir, label)
       .then((updated) =>
         setReport((r) =>
           r
@@ -45,7 +50,7 @@ export default function DoneStep() {
         ),
       )
       .catch((e) => setErr(String(e)))
-      .finally(() => setOverwriting(null));
+      .finally(() => setPending(null));
   }
 
   return (
@@ -80,8 +85,9 @@ export default function DoneStep() {
               <p style={{ color: "var(--ink-2)", margin: "0 0 12px", lineHeight: 1.6 }}>
                 Files landed in <span className="mono">{state.receivedDir ?? "Documents\\WINC Received"}</span>.
                 Import moves them into your real folders — nothing on this PC is overwritten;
-                incoming duplicates are kept as “name (from old PC)”. Browser data is only
-                imported into browsers with no existing data.
+                incoming duplicates are kept as “name (from old PC)”. Browser data imports
+                only into browsers with no existing data; ones that already have data show
+                an <b>Overwrite?</b> option, and ones not yet opened show <b>Open First</b>.
               </p>
               <button className="btn btn--primary" disabled={busy || !state.receivedDir} onClick={runImport}>
                 {busy ? "Importing…" : "Import into place"}
@@ -106,11 +112,20 @@ export default function DoneStep() {
                   {en.action === "skipped-not-fresh" && en.browserLabel ? (
                     <button
                       className="btn btn--ghost import__overwrite"
-                      disabled={overwriting !== null}
-                      onClick={() => runOverwrite(en.browserLabel!)}
+                      disabled={pending !== null}
+                      onClick={() => runBrowserAction(en.browserLabel!, backend.importBrowserOverwrite)}
                       title={`Replace ${en.browserLabel}'s data with the old PC's. Current files are backed up to the WINC Received folder first.`}
                     >
-                      {overwriting === en.browserLabel ? "Overwriting…" : "Overwrite?"}
+                      {pending === en.browserLabel ? "Overwriting…" : "Overwrite?"}
+                    </button>
+                  ) : en.action === "skipped-not-installed" && en.browserLabel ? (
+                    <button
+                      className="btn btn--ghost import__overwrite"
+                      disabled={pending !== null}
+                      onClick={() => runBrowserAction(en.browserLabel!, backend.importBrowserRetry)}
+                      title={`Open ${en.browserLabel} once so it creates its profile, then click to finish importing.`}
+                    >
+                      {pending === en.browserLabel ? "Checking…" : "Open First"}
                     </button>
                   ) : (
                     <span className={`import__badge ${ACTION_BADGE[en.action].cls}`}>

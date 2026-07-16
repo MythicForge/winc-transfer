@@ -223,6 +223,27 @@ pub async fn import_browser_overwrite(
     .await
 }
 
+/// "Open First" re-check for one browser whose import was skipped as
+/// not-installed. Re-runs the non-force import so a newly-opened browser
+/// profile is picked up and routed to import / not-fresh as applicable.
+#[tauri::command]
+pub async fn import_browser_retry(
+    dir: String,
+    label: String,
+) -> Result<crate::import::ImportEntry, String> {
+    blocking(move || {
+        let p = std::path::PathBuf::from(&dir);
+        let base = dirs::document_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("WINC Received");
+        if !p.starts_with(&base) || !p.is_dir() {
+            return Err("not a WINC received folder".into());
+        }
+        crate::import::retry_browser(&p, &label)
+    })
+    .await
+}
+
 /// Add a Windows Firewall allow-rule for this exe on ALL profiles. The direct
 /// cable comes up as an "Unidentified network", which Windows puts on the
 /// Public profile — where inbound is blocked by default and the standard

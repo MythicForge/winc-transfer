@@ -50,6 +50,9 @@ export interface Backend {
   importReceived(dir: string): Promise<ImportReport>;
   /** RECEIVE side: force one browser's import ("Overwrite?"), backing up originals first. */
   importBrowserOverwrite(dir: string, label: string): Promise<ImportEntry>;
+  /** RECEIVE side: re-check one browser after "Open First" — re-runs its non-force
+   *  import so a newly-opened browser profile is picked up. */
+  importBrowserRetry(dir: string, label: string): Promise<ImportEntry>;
   cancel(): Promise<void>;
   /** Add a Windows Firewall allow-rule for WINCI on all profiles (UAC prompt). */
   allowFirewall(): Promise<void>;
@@ -119,6 +122,9 @@ function tauriBackend(): Backend {
     },
     importBrowserOverwrite(dir, label) {
       return invoke("import_browser_overwrite", { dir, label });
+    },
+    importBrowserRetry(dir, label) {
+      return invoke("import_browser_retry", { dir, label });
     },
     cancel() {
       return invoke("cancel");
@@ -226,7 +232,8 @@ function mockBackend(): Backend {
           { label: "Desktop", action: "imported" as const, count: 214, detail: null, browserLabel: null },
           { label: "Pictures", action: "imported" as const, count: 9021, detail: null, browserLabel: null },
           { label: "Tax Stuff", action: "imported" as const, count: 96, detail: "→ Documents\\Tax Stuff", browserLabel: null },
-          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — sign in and sync instead.", browserLabel: "Chrome" },
+          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — use Overwrite to replace it with the old PC's (originals are backed up first).", browserLabel: "Chrome" },
+          { label: "Edge (browser)", action: "skipped-not-installed" as const, count: 0, detail: "Edge isn't installed on this PC (or has never been opened).", browserLabel: "Edge" },
         ],
       };
     },
@@ -235,8 +242,20 @@ function mockBackend(): Backend {
       return {
         label: `${label} (browser)`,
         action: "imported" as const,
-        count: 6,
-        detail: `overwrote 6 — originals in C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000\\Backup\\${label}`,
+        count: 9,
+        detail: `overwrote 9 — originals in C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000\\Backup\\${label}`,
+        browserLabel: label,
+      };
+    },
+    async importBrowserRetry(_dir, label) {
+      await sleep(900);
+      // Simulate the user having opened the browser: profile now exists and is
+      // fresh, so the retry succeeds.
+      return {
+        label: `${label} (browser)`,
+        action: "imported" as const,
+        count: 9,
+        detail: null,
         browserLabel: label,
       };
     },

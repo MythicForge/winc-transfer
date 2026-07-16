@@ -269,6 +269,25 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         }
     };
 
+    // Whole-browser atomic: import ALL files or NONE. Chromium saved passwords
+    // are a matched pair — `Login Data` is encrypted with a key held in
+    // `Local State`, so they only decrypt if imported together. A per-file
+    // "copy just the missing ones" policy could split that pair (e.g. copy an
+    // old `Login Data` next to the new PC's `Local State`), leaving passwords
+    // undecryptable or clobbering the new PC's own credential key. So if any
+    // incoming file already exists on the new PC, skip the browser as
+    // not-fresh and let the user choose "Overwrite?" (which replaces the whole
+    // set after backing the originals up).
+    if !force && files.iter().any(|(_, name)| dest_for(name).exists()) {
+        return entry(
+            "skipped-not-fresh",
+            0,
+            Some(format!(
+                "{label} already has data on this PC — use Overwrite to replace it with the old PC's (originals are backed up first)."
+            )),
+        );
+    }
+
     // fail-safe: snapshot the new PC's originals before any overwrite
     let backup_dir = src
         .parent() // .../Browser
@@ -276,20 +295,9 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         .map(|d| d.join("Backup").join(label));
     let mut backed_up = 0u64;
 
-    // Per-file, not per-group: copy the files that are genuinely missing on the
-    // new PC; leave the ones that already exist untouched (unless forced via the
-    // "Overwrite?" action). The old code skipped the *entire* browser if any one
-    // file already existed, so a browser opened even once on the new PC imported
-    // nothing — passwords included.
     let mut copied = 0u64;
-    let mut skipped = 0u64;
     for (path, name) in &files {
         let dest = dest_for(name);
-        if dest.exists() && !force {
-            skipped += 1;
-            log_row(log, path, &dest, "skipped-exists");
-            continue;
-        }
         if force && dest.exists() {
             if let Some(bdir) = &backup_dir {
                 let bpath = bdir.join(name);
@@ -322,36 +330,16 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         log_row(log, path, &dest, if overwrote { "overwrote" } else { "copied" });
         copied += 1;
     }
-
-    // Nothing new to add and files already present ⇒ still report as
-    // not-fresh so the UI can offer "Overwrite?" (which backs up first).
-    if copied == 0 && skipped > 0 {
-        return entry(
-            "skipped-not-fresh",
-            0,
-            Some(format!(
-                "{label} already has this data — use Overwrite to replace it (originals are backed up first)."
-            )),
-        );
-    }
-    let mut details: Vec<String> = Vec::new();
-    if skipped > 0 {
-        details.push(format!("{skipped} already present, kept"));
-    }
-    if backed_up > 0 {
-        details.push(format!(
+    let detail = (backed_up > 0).then(|| {
+        format!(
             "overwrote {backed_up} — originals in {}",
             backup_dir
                 .as_deref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "Backup".into())
-        ));
-    }
-    entry(
-        "imported",
-        copied,
-        (!details.is_empty()).then(|| details.join(" · ")),
-    )
+        )
+    });
+    entry("imported", copied, detail)
 }
 
 /// Force-import a single browser's received data (the UI's "Overwrite?" —
@@ -363,6 +351,22 @@ pub fn overwrite_browser(dump: &Path, label: &str) -> Result<ImportEntry, String
     }
     let mut log: Vec<LogRow> = Vec::new();
     let entry = import_browser(&src, label, true, &mut log);
+    write_log(dump, &log);
+    Ok(entry)
+}
+
+/// Re-attempt a single browser's non-force import (the UI's "Open First" —
+/// used after a browser reported "skipped-not-installed"). Once the user opens
+/// the browser so its profile exists, this re-evaluates state and returns the
+/// now-applicable outcome: "imported" (fresh), "skipped-not-fresh" (needs
+/// Overwrite), or "skipped-not-installed" again (still not opened/installed).
+pub fn retry_browser(dump: &Path, label: &str) -> Result<ImportEntry, String> {
+    let src = dump.join("Browser").join(label);
+    if !src.is_dir() {
+        return Err(format!("no received data for {label}"));
+    }
+    let mut log: Vec<LogRow> = Vec::new();
+    let entry = import_browser(&src, label, false, &mut log);
     write_log(dump, &log);
     Ok(entry)
 }
