@@ -240,39 +240,64 @@ pub fn send_files<F: Fn(TransferProgress)>(
     let mut buf = vec![0u8; BUF];
     let start = Instant::now();
     let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut failed: Vec<String> = Vec::new();
 
+    // Each file is streamed as length-prefixed chunks: a u32 (big-endian) byte
+    // count followed by that many bytes, repeated, terminated by a 0-length
+    // chunk. This framing lets us skip an unreadable file (e.g. an un-hydrated
+    // OneDrive placeholder that fails mid-read with os error 362) without
+    // desyncing the receiver, which no longer relies on the manifest sizes.
     for (idx, item) in items.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             emit(TransferProgress::error("Cancelled"));
             return Ok(());
         }
-        let mut f = match std::fs::File::open(&item.abs) {
-            Ok(f) => f,
-            Err(_) => continue, // locked/removed file: skip, keep the manifest count honest below
-        };
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            writer.write_all(&buf[..n])?;
-            sent += n as u64;
-            if last_emit.elapsed() >= Duration::from_millis(150) {
-                let secs = start.elapsed().as_secs_f64().max(0.001);
-                emit(TransferProgress::running(
-                    sent,
-                    total_bytes,
-                    idx as u64,
-                    total_files,
-                    sent as f64 / secs,
-                    &item.rel,
-                ));
-                last_emit = Instant::now();
-            }
+        let mut ok = true;
+        match std::fs::File::open(&item.abs) {
+            Ok(mut f) => loop {
+                let n = match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    // cloud placeholder / IO fault mid-read: stop this file, keep the stream sane
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
+                writer.write_all(&(n as u32).to_be_bytes())?;
+                writer.write_all(&buf[..n])?;
+                sent += n as u64;
+                if last_emit.elapsed() >= Duration::from_millis(150) {
+                    let secs = start.elapsed().as_secs_f64().max(0.001);
+                    emit(TransferProgress::running(
+                        sent,
+                        total_bytes,
+                        idx as u64,
+                        total_files,
+                        sent as f64 / secs,
+                        &item.rel,
+                    ));
+                    last_emit = Instant::now();
+                }
+            },
+            Err(_) => ok = false, // locked/removed/placeholder: skip cleanly
+        }
+        // 0-length chunk = end of this file
+        writer.write_all(&0u32.to_be_bytes())?;
+        if !ok {
+            failed.push(item.rel.clone());
         }
     }
     writer.flush()?;
-    emit(TransferProgress::done(total_bytes, total_files));
+    if failed.is_empty() {
+        emit(TransferProgress::done(total_bytes, total_files));
+    } else {
+        emit(TransferProgress::error(&format!(
+            "{} file(s) could not be read (cloud/offline or locked): {}",
+            failed.len(),
+            failed.join(", ")
+        )));
+    }
     Ok(())
 }
 
@@ -349,27 +374,35 @@ pub fn receive_files<F: Fn(TransferProgress)>(
             std::fs::create_dir_all(parent)?;
         }
         let mut out = std::fs::File::create(&out_path)?;
-        let mut remaining = entry.size;
-        while remaining > 0 {
-            let want = remaining.min(buf.len() as u64) as usize;
-            let n = reader.read(&mut buf[..want])?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream ended early"));
+        // Read length-prefixed chunks until the 0-length end-of-file marker.
+        loop {
+            let mut lenb = [0u8; 4];
+            reader.read_exact(&mut lenb)?;
+            let mut remaining = u32::from_be_bytes(lenb) as usize;
+            if remaining == 0 {
+                break; // end of this file
             }
-            out.write_all(&buf[..n])?;
-            remaining -= n as u64;
-            got += n as u64;
-            if last_emit.elapsed() >= Duration::from_millis(150) {
-                let secs = start.elapsed().as_secs_f64().max(0.001);
-                emit(TransferProgress::running(
-                    got,
-                    manifest.total_bytes,
-                    idx as u64,
-                    manifest.total_files,
-                    got as f64 / secs,
-                    &entry.rel,
-                ));
-                last_emit = Instant::now();
+            while remaining > 0 {
+                let want = remaining.min(buf.len());
+                let n = reader.read(&mut buf[..want])?;
+                if n == 0 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream ended early"));
+                }
+                out.write_all(&buf[..n])?;
+                remaining -= n;
+                got += n as u64;
+                if last_emit.elapsed() >= Duration::from_millis(150) {
+                    let secs = start.elapsed().as_secs_f64().max(0.001);
+                    emit(TransferProgress::running(
+                        got,
+                        manifest.total_bytes,
+                        idx as u64,
+                        manifest.total_files,
+                        got as f64 / secs,
+                        &entry.rel,
+                    ));
+                    last_emit = Instant::now();
+                }
             }
         }
     }
