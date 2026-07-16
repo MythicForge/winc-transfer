@@ -1,4 +1,5 @@
 mod commands;
+mod crypto;
 mod model;
 mod net;
 mod sources;

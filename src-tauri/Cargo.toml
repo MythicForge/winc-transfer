@@ -1,6 +1,6 @@
 [package]
 name = "winc"
-version = "0.1.0"
+version = "0.2.0"
 description = "WINC — direct-cable PC data crossing"
 authors = ["you"]
 license = ""
@@ -27,3 +27,9 @@ rand = "0.8"
 walkdir = "2.5"
 dirs = "5.0"
 if-addrs = "0.13"
+
+# encrypted transport (SPAKE2 + AEAD)
+spake2 = "0.4"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"

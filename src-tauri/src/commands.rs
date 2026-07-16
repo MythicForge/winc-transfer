@@ -1,9 +1,8 @@
 use crate::model::*;
-use crate::{net, sources};
+use crate::{crypto, net, sources};
 use rand::Rng;
 use serde::Serialize;
 use std::net::TcpListener;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,7 +15,7 @@ pub struct Session {
     pub code: Mutex<Option<String>>, // 6 digits, no spaces
     pub beacon_stop: Mutex<Option<Arc<AtomicBool>>>,
     pub listener: Mutex<Option<TcpListener>>,
-    pub send_stream: Mutex<Option<TcpStream>>,
+    pub send_stream: Mutex<Option<crypto::EncryptedStream>>,
 }
 
 #[derive(Serialize)]
@@ -110,7 +109,7 @@ pub fn start_send(
     state: State<'_, Session>,
 ) -> Result<(), String> {
     state.cancel.store(false, Ordering::Relaxed);
-    let stream = state
+    let mut stream = state
         .send_stream
         .lock()
         .unwrap()
@@ -124,7 +123,7 @@ pub fn start_send(
 
     let cancel = state.cancel.clone();
     let emit = emitter(&app);
-    net::send_files(&stream, &items, &cancel, emit).map_err(|e| {
+    net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
         let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
         e.to_string()
     })
@@ -142,7 +141,7 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
     let code = state.code.lock().unwrap().clone().unwrap_or_default();
     let cancel = state.cancel.clone();
 
-    let (stream, peer) =
+    let (mut stream, peer) =
         net::accept_and_verify(&listener, &code, &cancel).map_err(|e| e.to_string())?;
     let _ = app.emit("winc://paired", &peer);
 
@@ -155,7 +154,7 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
 
     let emit = emitter(&app);
-    net::receive_files(&stream, &dest, &cancel, emit).map_err(|e| {
+    net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
         let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
         e.to_string()
     })
