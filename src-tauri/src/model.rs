@@ -119,12 +119,13 @@ pub struct Beacon {
     pub port: u16,
 }
 
-/// First TCP message, SENDER -> RECEIVER.
+/// First encrypted message, SENDER -> RECEIVER. The pairing code is never
+/// transmitted — knowledge of it is proven by the SPAKE2 handshake (a wrong
+/// code makes this message undecryptable). Do not add the code back.
 #[derive(Serialize, Deserialize)]
 pub struct Hello {
     pub magic: String,
     pub name: String,
-    pub code: String,
 }
 
 #[derive(Serialize, Deserialize)]

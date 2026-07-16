@@ -1,8 +1,7 @@
+use crate::crypto::{self, EncryptedStream};
 use crate::model::*;
 use crate::sources::Item;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -194,55 +193,37 @@ pub fn discover(timeout: Duration) -> Option<Peer> {
     None
 }
 
-/* ---------------- framing ---------------- */
-
-fn write_msg<W: Write, T: Serialize>(w: &mut W, v: &T) -> io::Result<()> {
-    let mut s = serde_json::to_string(v)?;
-    s.push('\n');
-    w.write_all(s.as_bytes())?;
-    w.flush()
-}
-
-fn read_msg<R: BufRead, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
-    let mut line = String::new();
-    if r.read_line(&mut line)? == 0 {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed"));
-    }
-    serde_json::from_str(line.trim_end())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-}
-
 /* ---------------- sender side ---------------- */
 
-/// Connect to the receiver and complete the code handshake. Keeps the
-/// connection open (returned) for the later file stream.
-pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<TcpStream> {
+/// Connect to the receiver, run the encrypted (SPAKE2) handshake, and prove the
+/// code. Keeps the connection open (returned) for the later file stream.
+pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<EncryptedStream> {
     let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port)
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad peer address"))?;
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(8))?;
     stream.set_nodelay(true).ok();
-    let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut enc = crypto::pake_handshake(&stream, code, true)?;
 
-    write_msg(
-        &mut writer,
-        &Hello {
-            magic: PROTO_MAGIC.into(),
-            name: my_name.to_string(),
-            code: code.to_string(),
-        },
-    )?;
-    let ack: HelloAck = read_msg(&mut reader)?;
+    enc.write_json(&Hello {
+        magic: PROTO_MAGIC.into(),
+        name: my_name.to_string(),
+    })?;
+    // On a wrong code the receiver can't decrypt our Hello and drops the
+    // connection, so on Windows this read fails with a reset (os error 10054)
+    // rather than a tidy refusal — surface it as "wrong code" either way.
+    let ack: HelloAck = enc
+        .read_json()
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"))?;
     if !ack.ok {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
     }
-    Ok(stream)
+    Ok(enc)
 }
 
 /// Stream the selected items over an already-paired connection.
 pub fn send_files<F: Fn(TransferProgress)>(
-    stream: &TcpStream,
+    stream: &mut EncryptedStream,
     items: &[Item],
     cancel: &Arc<AtomicBool>,
     emit: F,
@@ -257,15 +238,11 @@ pub fn send_files<F: Fn(TransferProgress)>(
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     let total_files = entries.len() as u64;
 
-    let mut writer = stream.try_clone()?;
-    write_msg(
-        &mut writer,
-        &Manifest {
-            files: entries.clone(),
-            total_bytes,
-            total_files,
-        },
-    )?;
+    stream.write_json(&Manifest {
+        files: entries.clone(),
+        total_bytes,
+        total_files,
+    })?;
 
     let mut sent: u64 = 0;
     let mut buf = vec![0u8; BUF];
@@ -273,11 +250,12 @@ pub fn send_files<F: Fn(TransferProgress)>(
     let mut last_emit = Instant::now() - Duration::from_secs(1);
     let mut failed: Vec<String> = Vec::new();
 
-    // Each file is streamed as length-prefixed chunks: a u32 (big-endian) byte
-    // count followed by that many bytes, repeated, terminated by a 0-length
-    // chunk. This framing lets us skip an unreadable file (e.g. an un-hydrated
-    // OneDrive placeholder that fails mid-read with os error 362) without
-    // desyncing the receiver, which no longer relies on the manifest sizes.
+    // Each file is streamed as a sequence of encrypted frames (one per ≤256 KB
+    // chunk), terminated by an empty frame. A file read never yields a 0-byte
+    // chunk, so the empty frame is an unambiguous end-of-file marker. This lets
+    // us skip an unreadable file (e.g. an un-hydrated OneDrive placeholder that
+    // fails mid-read with os error 362) without desyncing the receiver, which
+    // does not rely on the manifest sizes.
     for (idx, item) in items.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             emit(TransferProgress::error("Cancelled"));
@@ -295,8 +273,7 @@ pub fn send_files<F: Fn(TransferProgress)>(
                         break;
                     }
                 };
-                writer.write_all(&(n as u32).to_be_bytes())?;
-                writer.write_all(&buf[..n])?;
+                stream.write_frame(&buf[..n])?;
                 sent += n as u64;
                 if last_emit.elapsed() >= Duration::from_millis(150) {
                     let secs = start.elapsed().as_secs_f64().max(0.001);
@@ -313,13 +290,13 @@ pub fn send_files<F: Fn(TransferProgress)>(
             },
             Err(_) => ok = false, // locked/removed/placeholder: skip cleanly
         }
-        // 0-length chunk = end of this file
-        writer.write_all(&0u32.to_be_bytes())?;
+        // empty frame = end of this file
+        stream.write_frame(&[])?;
         if !ok {
             failed.push(item.rel.clone());
         }
     }
-    writer.flush()?;
+    stream.flush()?;
     if failed.is_empty() {
         emit(TransferProgress::done(total_bytes, total_files));
     } else {
@@ -340,7 +317,7 @@ pub fn accept_and_verify(
     listener: &TcpListener,
     code: &str,
     cancel: &Arc<AtomicBool>,
-) -> io::Result<(TcpStream, Peer)> {
+) -> io::Result<(EncryptedStream, Peer)> {
     listener.set_nonblocking(true)?;
     let (stream, addr) = loop {
         if cancel.load(Ordering::Relaxed) {
@@ -357,21 +334,30 @@ pub fn accept_and_verify(
     };
     stream.set_nonblocking(false)?; // blocking again for the transfer
     stream.set_nodelay(true).ok();
-    let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut enc = crypto::pake_handshake(&stream, code, false)?;
 
-    let hello: Hello = read_msg(&mut reader)?;
-    let ok = hello.magic == PROTO_MAGIC && hello.code == code;
-    write_msg(&mut writer, &HelloAck { ok })?;
-    if !ok {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "code mismatch"));
+    // A decrypt failure here means the sender used a different code — one
+    // wrong online guess kills the connection, which is the rate limit. The
+    // short sleep is cheap defense-in-depth against rapid retries.
+    let hello: Hello = match enc.read_json() {
+        Ok(h) => h,
+        Err(e) => {
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            return Err(e);
+        }
+    };
+    if hello.magic != PROTO_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a WINC peer"));
     }
+    enc.write_json(&HelloAck { ok: true })?;
     let ip = match addr {
         SocketAddr::V4(v4) => v4.ip().to_string(),
         SocketAddr::V6(v6) => v6.ip().to_string(),
     };
     Ok((
-        stream,
+        enc,
         Peer {
             name: hello.name,
             ip,
@@ -382,16 +368,14 @@ pub fn accept_and_verify(
 
 /// Read the manifest + file stream into `dest`, emitting progress.
 pub fn receive_files<F: Fn(TransferProgress)>(
-    stream: &TcpStream,
+    stream: &mut EncryptedStream,
     dest: &Path,
     cancel: &Arc<AtomicBool>,
     emit: F,
 ) -> io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let manifest: Manifest = read_msg(&mut reader)?;
+    let manifest: Manifest = stream.read_json()?;
 
     let mut got: u64 = 0;
-    let mut buf = vec![0u8; BUF];
     let start = Instant::now();
     let mut last_emit = Instant::now() - Duration::from_secs(1);
 
@@ -405,35 +389,25 @@ pub fn receive_files<F: Fn(TransferProgress)>(
             std::fs::create_dir_all(parent)?;
         }
         let mut out = std::fs::File::create(&out_path)?;
-        // Read length-prefixed chunks until the 0-length end-of-file marker.
+        // Read one decrypted frame per chunk until the empty end-of-file frame.
         loop {
-            let mut lenb = [0u8; 4];
-            reader.read_exact(&mut lenb)?;
-            let mut remaining = u32::from_be_bytes(lenb) as usize;
-            if remaining == 0 {
+            let chunk = stream.read_frame()?;
+            if chunk.is_empty() {
                 break; // end of this file
             }
-            while remaining > 0 {
-                let want = remaining.min(buf.len());
-                let n = reader.read(&mut buf[..want])?;
-                if n == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream ended early"));
-                }
-                out.write_all(&buf[..n])?;
-                remaining -= n;
-                got += n as u64;
-                if last_emit.elapsed() >= Duration::from_millis(150) {
-                    let secs = start.elapsed().as_secs_f64().max(0.001);
-                    emit(TransferProgress::running(
-                        got,
-                        manifest.total_bytes,
-                        idx as u64,
-                        manifest.total_files,
-                        got as f64 / secs,
-                        &entry.rel,
-                    ));
-                    last_emit = Instant::now();
-                }
+            out.write_all(&chunk)?;
+            got += chunk.len() as u64;
+            if last_emit.elapsed() >= Duration::from_millis(150) {
+                let secs = start.elapsed().as_secs_f64().max(0.001);
+                emit(TransferProgress::running(
+                    got,
+                    manifest.total_bytes,
+                    idx as u64,
+                    manifest.total_files,
+                    got as f64 / secs,
+                    &entry.rel,
+                ));
+                last_emit = Instant::now();
             }
         }
     }
