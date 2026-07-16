@@ -35,10 +35,52 @@ fn measure_dir(root: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
+/* ---------------- browser catalog ----------------
+ * Three families, each data-driven so adding a browser is one table row.
+ * Chromium family: profile lives in %LOCALAPPDATA%\<dir>\Default.
+ * Opera family:    Chromium-based but under %APPDATA%, and older installs keep
+ *                  the profile files directly in the dir (no Default\).
+ * Gecko family:    Firefox-style %APPDATA%\<dir>\Profiles\<xxx.default*>\.
+ */
+
+/// (group id, label, %LOCALAPPDATA%-relative "User Data" dir)
+const CHROMIUM_BROWSERS: &[(&str, &str, &str)] = &[
+    ("chrome", "Chrome", "Google/Chrome/User Data"),
+    ("edge", "Edge", "Microsoft/Edge/User Data"),
+    ("brave", "Brave", "BraveSoftware/Brave-Browser/User Data"),
+    ("vivaldi", "Vivaldi", "Vivaldi/User Data"),
+    ("chromium", "Chromium", "Chromium/User Data"),
+];
+
+/// (group id, label, %APPDATA%-relative profile dir)
+const OPERA_BROWSERS: &[(&str, &str, &str)] = &[
+    ("opera", "Opera", "Opera Software/Opera Stable"),
+    ("opera-gx", "Opera GX", "Opera Software/Opera GX Stable"),
+];
+
+/// (group id, label, %APPDATA%-relative Profiles root)
+const GECKO_BROWSERS: &[(&str, &str, &str)] = &[
+    ("firefox", "Firefox", "Mozilla/Firefox/Profiles"),
+    ("zen", "Zen", "zen/Profiles"),
+    ("librewolf", "LibreWolf", "librewolf/Profiles"),
+    ("waterfox", "Waterfox", "Waterfox/Profiles"),
+    ("floorp", "Floorp", "Floorp/Profiles"),
+];
+
+const CHROMIUM_HISTORY: &[&str] =
+    &["Bookmarks", "History", "Favicons", "Top Sites", "Shortcuts", "Preferences"];
+const CHROMIUM_PASSWORDS: &[&str] = &["Login Data", "Login Data For Account"];
+/// Gecko keeps logins portable (logins.json + key4.db), so they travel with the
+/// main group instead of a separate DPAPI-caveat group.
+const GECKO_FILES: &[&str] = &["places.sqlite", "favicons.sqlite", "logins.json", "key4.db"];
+
 /// The specific files that make up a browser group, as (abs, rel).
+/// Ids: the table id for bookmarks/history, or "<id>-pw" for saved passwords.
 fn browser_files(id: &str) -> Vec<Item> {
-    let local = env_dir("LOCALAPPDATA");
-    let appdata = env_dir("APPDATA");
+    let (base_id, pw) = match id.strip_suffix("-pw") {
+        Some(b) => (b, true),
+        None => (id, false),
+    };
     let mut out = Vec::new();
     let mut add = |base: &Path, rel_root: &str, names: &[&str]| {
         for n in names {
@@ -51,49 +93,48 @@ fn browser_files(id: &str) -> Vec<Item> {
             }
         }
     };
-    let history = &["Bookmarks", "History", "Favicons", "Top Sites", "Shortcuts", "Preferences"];
-    let passwords = &["Login Data", "Login Data For Account", "Local State"];
 
-    match id {
-        "chrome" => {
-            if let Some(l) = &local {
-                add(&l.join("Google/Chrome/User Data/Default"), "Chrome", history);
+    // Chromium + Opera share the same file layout; they differ only in where
+    // the "User Data"-style dir lives and whether a Default\ subdir exists.
+    let chromium_like = CHROMIUM_BROWSERS
+        .iter()
+        .find(|(i, ..)| *i == base_id)
+        .and_then(|(_, label, dir)| env_dir("LOCALAPPDATA").map(|l| (*label, l.join(dir))))
+        .or_else(|| {
+            OPERA_BROWSERS
+                .iter()
+                .find(|(i, ..)| *i == base_id)
+                .and_then(|(_, label, dir)| env_dir("APPDATA").map(|a| (*label, a.join(dir))))
+        });
+    if let Some((label, root)) = chromium_like {
+        let profile = if root.join("Default").is_dir() {
+            root.join("Default")
+        } else {
+            root.clone()
+        };
+        if pw {
+            add(&profile, label, CHROMIUM_PASSWORDS);
+            add(&root, label, &["Local State"]); // holds the DPAPI-wrapped key
+        } else {
+            add(&profile, label, CHROMIUM_HISTORY);
+        }
+        return out;
+    }
+
+    if let Some((_, label, dir)) = GECKO_BROWSERS.iter().find(|(i, ..)| *i == base_id) {
+        if let Some(a) = env_dir("APPDATA") {
+            if let Some(profile) = gecko_profile(&a.join(dir)) {
+                add(&profile, label, GECKO_FILES);
             }
         }
-        "chrome-pw" => {
-            if let Some(l) = &local {
-                let ud = l.join("Google/Chrome/User Data");
-                add(&ud.join("Default"), "Chrome", &["Login Data", "Login Data For Account"]);
-                add(&ud, "Chrome", &["Local State"]);
-            }
-        }
-        "edge" => {
-            if let Some(l) = &local {
-                add(&l.join("Microsoft/Edge/User Data/Default"), "Edge", history);
-            }
-        }
-        "edge-pw" => {
-            if let Some(l) = &local {
-                let ud = l.join("Microsoft/Edge/User Data");
-                add(&ud.join("Default"), "Edge", passwords);
-            }
-        }
-        "firefox" => {
-            if let Some(a) = &appdata {
-                if let Some(profile) = firefox_profile(a) {
-                    add(&profile, "Firefox", &["places.sqlite", "favicons.sqlite", "logins.json", "key4.db"]);
-                }
-            }
-        }
-        _ => {}
     }
     out
 }
 
-fn firefox_profile(appdata: &Path) -> Option<PathBuf> {
-    let base = appdata.join("Mozilla/Firefox/Profiles");
+/// Pick the default profile dir under a Firefox-style Profiles root.
+fn gecko_profile(base: &Path) -> Option<PathBuf> {
     let mut best: Option<PathBuf> = None;
-    for e in std::fs::read_dir(&base).ok()?.filter_map(|e| e.ok()) {
+    for e in std::fs::read_dir(base).ok()?.filter_map(|e| e.ok()) {
         let p = e.path();
         let name = p.file_name()?.to_string_lossy().to_string();
         if name.ends_with(".default-release") {
@@ -135,15 +176,28 @@ pub fn list_sources() -> Vec<SourceGroup> {
         }
     }
 
-    let browsers: [(&str, &str, Option<&str>, bool); 5] = [
-        ("chrome", "Chrome — bookmarks & history", None, true),
-        ("edge", "Edge — bookmarks & history", None, false),
-        ("firefox", "Firefox — bookmarks & history", None, false),
-        ("chrome-pw", "Chrome — saved passwords", Some(PW_CAVEAT), false),
-        ("edge-pw", "Edge — saved passwords", Some(PW_CAVEAT), false),
-    ];
+    // Every browser from the catalog that actually exists on this PC:
+    // bookmarks & history for all three families, then saved-password groups
+    // for the Chromium-family ones (Gecko logins travel with the main group).
+    let mut browsers: Vec<(String, String, Option<&str>, bool)> = Vec::new();
+    for (id, label, _) in CHROMIUM_BROWSERS.iter().chain(OPERA_BROWSERS).chain(GECKO_BROWSERS) {
+        browsers.push((
+            id.to_string(),
+            format!("{label} — bookmarks & history"),
+            None,
+            *id == "chrome",
+        ));
+    }
+    for (id, label, _) in CHROMIUM_BROWSERS.iter().chain(OPERA_BROWSERS) {
+        browsers.push((
+            format!("{id}-pw"),
+            format!("{label} — saved passwords"),
+            Some(PW_CAVEAT),
+            false,
+        ));
+    }
     for (id, label, caveat, on) in browsers {
-        let files = browser_files(id);
+        let files = browser_files(&id);
         if files.is_empty() {
             continue;
         }
@@ -152,8 +206,8 @@ pub fn list_sources() -> Vec<SourceGroup> {
             .filter_map(|i| std::fs::metadata(&i.abs).ok().map(|m| m.len()))
             .sum();
         groups.push(SourceGroup {
-            id: id.to_string(),
-            label: label.to_string(),
+            id,
+            label,
             hint: "Default profile".into(),
             kind: "browser".into(),
             path: None,

@@ -7,6 +7,15 @@ export default function ConnectStep() {
   const { state, dispatch } = useStore();
   const next = state.role === "receive" ? "code" : "pair";
   const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
+  const [fw, setFw] = useState<"idle" | "working" | "done" | "error">("idle");
+
+  const allowFirewall = useCallback(() => {
+    setFw("working");
+    backend
+      .allowFirewall()
+      .then(() => setFw("done"))
+      .catch(() => setFw("error"));
+  }, []);
 
   useEffect(() => {
     return backend.watchLink((link) => dispatch({ t: "link", link }));
@@ -99,6 +108,29 @@ export default function ConnectStep() {
             Windows settings.
           </p>
         )}
+
+        {/* Windows treats the cable link as an "Unidentified network" (Public
+            profile) and silently blocks WINC's discovery + listener there —
+            the standard firewall prompt only covers Private networks. */}
+        <div style={{ marginTop: 16 }}>
+          <p style={{ color: "var(--ink-2)", margin: "0 0 8px" }}>
+            If the PCs never find each other, Windows Firewall is usually blocking WINC on
+            “Public” networks — the cable link counts as one.
+          </p>
+          <button className="btn btn--ghost" onClick={allowFirewall} disabled={fw === "working"}>
+            {fw === "working"
+              ? "Waiting for admin approval…"
+              : fw === "done"
+                ? "✓ Firewall rule added"
+                : "Allow WINC through the firewall"}
+          </button>
+          {fw === "error" && (
+            <p className="field-warn" style={{ marginTop: 8 }}>
+              Couldn’t add the rule — the admin prompt was declined or blocked. You can also allow
+              WINC manually in “Windows Security → Firewall → Allow an app”.
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="actions">
