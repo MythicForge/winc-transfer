@@ -149,8 +149,9 @@ pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), St
     .await
 }
 
+/// Returns the folder the crossing landed in, for "Import into place".
 #[tauri::command]
-pub async fn receive(app: AppHandle) -> Result<(), String> {
+pub async fn receive(app: AppHandle) -> Result<String, String> {
     blocking(move || {
         let state = app.state::<Session>();
         state.cancel.store(false, Ordering::Relaxed);
@@ -179,7 +180,25 @@ pub async fn receive(app: AppHandle) -> Result<(), String> {
         net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
             let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
             e.to_string()
-        })
+        })?;
+        Ok(dest.display().to_string())
+    })
+    .await
+}
+
+/// Move a finished crossing out of Documents\WINC Received into the real user
+/// folders / browser profiles. Only accepts paths under WINC Received.
+#[tauri::command]
+pub async fn import_received(dir: String) -> Result<crate::import::ImportReport, String> {
+    blocking(move || {
+        let p = std::path::PathBuf::from(&dir);
+        let base = dirs::document_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("WINC Received");
+        if !p.starts_with(&base) || !p.is_dir() {
+            return Err("not a WINC received folder".into());
+        }
+        Ok(crate::import::import_received(&p))
     })
     .await
 }

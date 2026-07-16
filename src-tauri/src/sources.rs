@@ -10,7 +10,7 @@ pub struct Item {
     pub rel: String,
 }
 
-fn env_dir(key: &str) -> Option<PathBuf> {
+pub(crate) fn env_dir(key: &str) -> Option<PathBuf> {
     std::env::var_os(key).map(PathBuf::from).filter(|p| p.exists())
 }
 
@@ -44,7 +44,7 @@ fn measure_dir(root: &Path) -> (u64, u64) {
  */
 
 /// (group id, label, %LOCALAPPDATA%-relative "User Data" dir)
-const CHROMIUM_BROWSERS: &[(&str, &str, &str)] = &[
+pub(crate) const CHROMIUM_BROWSERS: &[(&str, &str, &str)] = &[
     ("chrome", "Chrome", "Google/Chrome/User Data"),
     ("edge", "Edge", "Microsoft/Edge/User Data"),
     ("brave", "Brave", "BraveSoftware/Brave-Browser/User Data"),
@@ -53,13 +53,13 @@ const CHROMIUM_BROWSERS: &[(&str, &str, &str)] = &[
 ];
 
 /// (group id, label, %APPDATA%-relative profile dir)
-const OPERA_BROWSERS: &[(&str, &str, &str)] = &[
+pub(crate) const OPERA_BROWSERS: &[(&str, &str, &str)] = &[
     ("opera", "Opera", "Opera Software/Opera Stable"),
     ("opera-gx", "Opera GX", "Opera Software/Opera GX Stable"),
 ];
 
 /// (group id, label, %APPDATA%-relative Profiles root)
-const GECKO_BROWSERS: &[(&str, &str, &str)] = &[
+pub(crate) const GECKO_BROWSERS: &[(&str, &str, &str)] = &[
     ("firefox", "Firefox", "Mozilla/Firefox/Profiles"),
     ("zen", "Zen", "zen/Profiles"),
     ("librewolf", "LibreWolf", "librewolf/Profiles"),
@@ -132,7 +132,7 @@ fn browser_files(id: &str) -> Vec<Item> {
 }
 
 /// Pick the default profile dir under a Firefox-style Profiles root.
-fn gecko_profile(base: &Path) -> Option<PathBuf> {
+pub(crate) fn gecko_profile(base: &Path) -> Option<PathBuf> {
     let mut best: Option<PathBuf> = None;
     for e in std::fs::read_dir(base).ok()?.filter_map(|e| e.ok()) {
         let p = e.path();

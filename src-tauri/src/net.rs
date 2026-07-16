@@ -461,7 +461,7 @@ pub fn receive_files<F: Fn(TransferProgress)>(
 }
 
 /// Join a relative path under `dest`, refusing any component that would escape it.
-fn safe_join(dest: &Path, rel: &str) -> PathBuf {
+pub(crate) fn safe_join(dest: &Path, rel: &str) -> PathBuf {
     let mut p = dest.to_path_buf();
     for comp in rel.split(['/', '\\']) {
         if comp.is_empty() || comp == "." || comp == ".." {

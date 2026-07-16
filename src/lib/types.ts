@@ -46,6 +46,24 @@ export type TransferProgress = {
   error?: string;
 };
 
+/** One group's outcome from "Import into place" on the receiver. */
+export type ImportAction =
+  | "imported"
+  | "skipped-not-fresh"
+  | "skipped-not-installed"
+  | "error";
+
+export type ImportEntry = {
+  label: string;
+  action: ImportAction;
+  count: number;
+  detail: string | null;
+};
+
+export type ImportReport = {
+  entries: ImportEntry[];
+};
+
 /** Events emitted from backend during a live session. */
 export type BackendEvent =
   | { type: "link"; payload: LinkStatus }

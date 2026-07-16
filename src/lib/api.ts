@@ -5,6 +5,7 @@
  */
 import type {
   AdapterInfo,
+  ImportReport,
   LinkStatus,
   Peer,
   SourceGroup,
@@ -41,8 +42,11 @@ export interface Backend {
     groupIds: string[],
     onProgress: ProgressCb,
   ): Promise<void>;
-  /** RECEIVE side: wait for + accept an incoming transfer; progress via cb. */
-  receive(onPeer: PeerCb, onProgress: ProgressCb): Promise<void>;
+  /** RECEIVE side: wait for + accept an incoming transfer; progress via cb.
+   *  Resolves with the folder the crossing landed in. */
+  receive(onPeer: PeerCb, onProgress: ProgressCb): Promise<string>;
+  /** RECEIVE side: move a finished crossing into the real folders / browsers. */
+  importReceived(dir: string): Promise<ImportReport>;
   cancel(): Promise<void>;
   /** Add a Windows Firewall allow-rule for WINC on all profiles (UAC prompt). */
   allowFirewall(): Promise<void>;
@@ -101,11 +105,14 @@ function tauriBackend(): Backend {
       const unP = await listen<Peer>("winc://paired", onPeer);
       const unG = await listen<TransferProgress>("winc://progress", onProgress);
       try {
-        await invoke("receive");
+        return await invoke<string>("receive");
       } finally {
         unP();
         unG();
       }
+    },
+    importReceived(dir) {
+      return invoke("import_received", { dir });
     },
     cancel() {
       return invoke("cancel");
@@ -204,6 +211,19 @@ function mockBackend(): Backend {
       await sleep(2000);
       onPeer({ name: "OLD-DELL-7490", ip: "169.254.42.9", port: 52128 });
       await this.startSend({ name: "x", ip: "x", port: 0 }, ["docs", "desktop", "pictures", "chrome"], onProgress);
+      return "C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000";
+    },
+    async importReceived() {
+      await sleep(1500);
+      return {
+        entries: [
+          { label: "Documents", action: "imported" as const, count: 12840, detail: "3 kept both" },
+          { label: "Desktop", action: "imported" as const, count: 214, detail: null },
+          { label: "Pictures", action: "imported" as const, count: 9021, detail: null },
+          { label: "Tax Stuff", action: "imported" as const, count: 96, detail: "→ Documents\\Tax Stuff" },
+          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — sign in and sync instead." },
+        ],
+      };
     },
     async cancel() {
       cancelled = true;

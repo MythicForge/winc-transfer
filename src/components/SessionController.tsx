@@ -43,6 +43,7 @@ export default function SessionController() {
           },
           onProgress,
         )
+        .then((dir) => dispatch({ t: "receivedDir", dir }))
         .catch(() => {});
     }
   }, [role, step, state.peer, state.sources, dispatch]);

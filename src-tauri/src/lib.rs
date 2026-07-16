@@ -1,5 +1,6 @@
 mod commands;
 mod crypto;
+mod import;
 mod model;
 mod net;
 mod sources;
@@ -33,6 +34,7 @@ pub fn run() {
             commands::receive,
             commands::cancel,
             commands::allow_firewall,
+            commands::import_received,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -28,6 +28,7 @@ export type State = {
   code: string; // shown (receive) or entered (send)
   sources: SourceGroup[];
   progress: TransferProgress;
+  receivedDir: string | null; // where the crossing landed, for "Import into place"
 };
 
 const emptyProgress: TransferProgress = {
@@ -49,6 +50,7 @@ export const initialState: State = {
   code: "",
   sources: [],
   progress: emptyProgress,
+  receivedDir: null,
 };
 
 type Action =
@@ -60,6 +62,8 @@ type Action =
   | { t: "code"; code: string }
   | { t: "sources"; sources: SourceGroup[] }
   | { t: "toggle"; id: string }
+  | { t: "select-all"; on: boolean }
+  | { t: "receivedDir"; dir: string }
   | { t: "progress"; progress: TransferProgress }
   | { t: "reset" };
 
@@ -86,6 +90,13 @@ function reducer(s: State, a: Action): State {
           g.id === a.id ? { ...g, selected: !g.selected } : g,
         ),
       };
+    case "select-all":
+      return {
+        ...s,
+        sources: s.sources.map((g) => ({ ...g, selected: a.on })),
+      };
+    case "receivedDir":
+      return { ...s, receivedDir: a.dir };
     case "progress":
       return { ...s, progress: a.progress };
     case "reset":

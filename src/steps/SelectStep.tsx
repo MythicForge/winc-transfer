@@ -6,6 +6,7 @@ import { MOCK } from "../lib/api";
 export default function SelectStep() {
   const { state, dispatch } = useStore();
   const chosen = state.sources.filter((s) => s.selected);
+  const allOn = state.sources.length > 0 && state.sources.every((s) => s.selected);
   const totalBytes = chosen.reduce((a, s) => a + s.bytes, 0);
   const totalItems = chosen.reduce((a, s) => a + s.items, 0);
 
@@ -74,6 +75,13 @@ export default function SelectStep() {
       </button>
 
       <div className="totals">
+        <button
+          className="btn btn--ghost"
+          disabled={state.sources.length === 0}
+          onClick={() => dispatch({ t: "select-all", on: !allOn })}
+        >
+          {allOn ? "Deselect all" : "Select all"}
+        </button>
         <div className="totals__n">
           <b>{bytes(totalBytes)}</b> across {count(totalItems)} items
         </div>

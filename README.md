@@ -1,6 +1,6 @@
 # WINC — Direct-Cable PC Data Crossing
 
-**Version 0.4.2**
+**Version 0.5.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** over a
 single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
@@ -84,6 +84,7 @@ src-tauri/src/
   net.rs                 link detection, UDP discovery, TCP transfer
   crypto.rs              SPAKE2 handshake + ChaCha20-Poly1305 framed transport
   sources.rs             enumerate + expand folders / browser data
+  import.rs              receiver "Import into place": dump dir -> real folders/profiles
   commands.rs            #[tauri::command]s + session state
   lib.rs                 app builder + handler registration
 ```
@@ -157,7 +158,18 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 
 ## Version notes
 
-**0.4.2** (current)
+**0.5.0** (current)
+- **Select all** — one-click select/deselect of every source group on the
+  sender's payload step.
+- **Import into place** — new button on the receiver's Done screen moves the
+  crossing out of `Documents\WINC Received` into the real user folders and,
+  when safe, into installed browsers (`import.rs`). Rules: nothing is ever
+  overwritten (duplicates kept as "name (from old PC)"); custom folders land
+  in `Documents\<name>`; browser data imports only into a browser with no
+  existing data — otherwise skipped with a "sign in and sync" hint. Per-group
+  results shown as a report.
+
+**0.4.2**
 - UI-freeze fix: long-running commands (`receive`, `start_send`, `pair`,
   `discover_peer`, `list_sources`, `allow_firewall`) were synchronous, and
   Tauri v2 runs sync commands on the main thread — the receiver froze

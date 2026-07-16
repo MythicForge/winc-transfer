@@ -405,6 +405,29 @@
   vertical-align: middle;
 }
 
+/* Import-into-place result badges (DoneStep, receiver) */
+.import__badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.import__badge--ok {
+  color: var(--ok, #2f8a4c);
+}
+.import__badge--warn {
+  color: var(--copper);
+}
+.import__badge--err {
+  color: var(--danger, #b3423f);
+}
+
 .totals {
   display: flex;
   justify-content: space-between;
