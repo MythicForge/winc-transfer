@@ -58,6 +58,8 @@ export type ImportEntry = {
   action: ImportAction;
   count: number;
   detail: string | null;
+  /** Raw catalog label ("Chrome") on browser entries — used for "Overwrite?". */
+  browserLabel: string | null;
 };
 
 export type ImportReport = {

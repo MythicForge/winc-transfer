@@ -1,6 +1,6 @@
 # WINC — Direct-Cable PC Data Crossing
 
-**Version 0.5.0**
+**Version 0.6.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** over a
 single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
@@ -158,7 +158,17 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 
 ## Version notes
 
-**0.5.0** (current)
+**0.6.0** (current)
+- **Overwrite?** — browser imports skipped as "not fresh" now show an
+  Overwrite? button in the report. Forcing it first backs the new PC's
+  existing files up to `WINC Received\crossing-<ts>\Backup\<Browser>\`,
+  then replaces them; if any backup fails, nothing further is overwritten.
+- **Snapshot log** — every import run writes `import-log-<ts>.json` in the
+  crossing folder recording each file's source → destination and outcome
+  (`copied` / `kept-both` / `backed-up` / `overwrote` / `failed`), so any
+  import can be traced or undone by hand.
+
+**0.5.0**
 - **Select all** — one-click select/deselect of every source group on the
   sender's payload step.
 - **Import into place** — new button on the receiver's Done screen moves the

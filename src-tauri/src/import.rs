@@ -26,12 +26,51 @@ pub struct ImportEntry {
     pub action: String,
     pub count: u64,
     pub detail: Option<String>,
+    /// Set for browser entries: the raw catalog label ("Chrome", "Opera GX"),
+    /// used by the UI's per-browser "Overwrite?" action.
+    pub browser_label: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     pub entries: Vec<ImportEntry>,
+}
+
+/// One row of the fail-safe snapshot: where a file came from and where it was
+/// (or was supposed to be) put. Written as import-log-<ts>.json in the dump
+/// dir after every import run, so anything can be traced or undone by hand.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogRow {
+    from: String,
+    to: String,
+    /// "copied" | "kept-both" | "backed-up" | "overwrote" | "failed"
+    status: String,
+}
+
+fn log_row(log: &mut Vec<LogRow>, from: &Path, to: &Path, status: &str) {
+    log.push(LogRow {
+        from: from.display().to_string(),
+        to: to.display().to_string(),
+        status: status.into(),
+    });
+}
+
+/// Persist the snapshot beside the received files. Best-effort — an import
+/// must not fail because the log couldn't be written.
+fn write_log(dump: &Path, log: &[LogRow]) -> Option<String> {
+    if log.is_empty() {
+        return None;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dump.join(format!("import-log-{ts}.json"));
+    let json = serde_json::to_vec_pretty(log).ok()?;
+    fs::write(&path, json).ok()?;
+    Some(path.display().to_string())
 }
 
 /// Where a browser's incoming files land. `root` differs from `profile` only
@@ -100,7 +139,13 @@ fn keep_both_path(dest: &Path) -> Option<PathBuf> {
 }
 
 /// Copy one folder group's tree into `target` with keep-both conflict handling.
-fn import_folder(src: &Path, target: &Path, label: &str, note: Option<String>) -> ImportEntry {
+fn import_folder(
+    src: &Path,
+    target: &Path,
+    label: &str,
+    note: Option<String>,
+    log: &mut Vec<LogRow>,
+) -> ImportEntry {
     let mut copied = 0u64;
     let mut kept_both = 0u64;
     let mut errors = 0u64;
@@ -115,14 +160,17 @@ fn import_folder(src: &Path, target: &Path, label: &str, note: Option<String>) -
             Err(_) => continue,
         };
         let mut dest = safe_join(target, &rel);
+        let mut renamed = false;
         if dest.exists() {
             match keep_both_path(&dest) {
                 Some(d) => {
                     kept_both += 1;
+                    renamed = true;
                     dest = d;
                 }
                 None => {
                     errors += 1;
+                    log_row(log, e.path(), &dest, "failed");
                     continue;
                 }
             }
@@ -142,8 +190,10 @@ fn import_folder(src: &Path, target: &Path, label: &str, note: Option<String>) -
             };
         if ok {
             copied += 1;
+            log_row(log, e.path(), &dest, if renamed { "kept-both" } else { "copied" });
         } else {
             errors += 1;
+            log_row(log, e.path(), &dest, "failed");
         }
     }
 
@@ -169,16 +219,21 @@ fn import_folder(src: &Path, target: &Path, label: &str, note: Option<String>) -
         } else {
             Some(details.join(" · "))
         },
+        browser_label: None,
     }
 }
 
-/// Import one received Browser/<Label> dir — only into a fresh profile.
-fn import_browser(src: &Path, label: &str) -> ImportEntry {
+/// Import one received Browser/<Label> dir. Without `force`, only a fresh
+/// profile is touched. With `force` (the UI's "Overwrite?" action), existing
+/// target files are first backed up to <dump>\Backup\<Label>\ so the new PC's
+/// originals survive, then replaced.
+fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -> ImportEntry {
     let entry = |action: &str, count: u64, detail: Option<String>| ImportEntry {
         label: format!("{label} (browser)"),
         action: action.into(),
         count,
         detail,
+        browser_label: Some(label.to_string()),
     };
 
     let target = match browser_target_by_label(label) {
@@ -214,8 +269,8 @@ fn import_browser(src: &Path, label: &str) -> ImportEntry {
         }
     };
 
-    // fresh check: any incoming name already present ⇒ skip the whole browser
-    if files.iter().any(|(_, name)| dest_for(name).exists()) {
+    // fresh check: any incoming name already present ⇒ skip, unless forced
+    if !force && files.iter().any(|(_, name)| dest_for(name).exists()) {
         return entry(
             "skipped-not-fresh",
             0,
@@ -225,27 +280,77 @@ fn import_browser(src: &Path, label: &str) -> ImportEntry {
         );
     }
 
+    // fail-safe: snapshot the new PC's originals before any overwrite
+    let backup_dir = src
+        .parent() // .../Browser
+        .and_then(|p| p.parent()) // dump root
+        .map(|d| d.join("Backup").join(label));
+    let mut backed_up = 0u64;
+
     let mut copied = 0u64;
     for (path, name) in &files {
         let dest = dest_for(name);
+        if force && dest.exists() {
+            if let Some(bdir) = &backup_dir {
+                let bpath = bdir.join(name);
+                let ok = fs::create_dir_all(bdir).is_ok() && fs::copy(&dest, &bpath).is_ok();
+                if !ok {
+                    // refuse to overwrite anything we couldn't back up
+                    log_row(log, &dest, &bpath, "failed");
+                    return entry(
+                        "error",
+                        copied,
+                        Some(format!("couldn't back up {name} — nothing overwritten past this point; close {label} and retry")),
+                    );
+                }
+                backed_up += 1;
+                log_row(log, &dest, &bpath, "backed-up");
+            }
+        }
         if let Some(p) = dest.parent() {
             let _ = fs::create_dir_all(p);
         }
+        let overwrote = dest.exists();
         if let Err(e) = fs::copy(path, &dest) {
+            log_row(log, path, &dest, "failed");
             return entry(
                 "error",
                 copied,
                 Some(format!("close {label} and retry — {e}")),
             );
         }
+        log_row(log, path, &dest, if overwrote { "overwrote" } else { "copied" });
         copied += 1;
     }
-    entry("imported", copied, None)
+    let detail = (backed_up > 0).then(|| {
+        format!(
+            "overwrote {backed_up} — originals in {}",
+            backup_dir
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "Backup".into())
+        )
+    });
+    entry("imported", copied, detail)
+}
+
+/// Force-import a single browser's received data (the UI's "Overwrite?" —
+/// backs up existing files first). Writes its own snapshot log.
+pub fn overwrite_browser(dump: &Path, label: &str) -> Result<ImportEntry, String> {
+    let src = dump.join("Browser").join(label);
+    if !src.is_dir() {
+        return Err(format!("no received data for {label}"));
+    }
+    let mut log: Vec<LogRow> = Vec::new();
+    let entry = import_browser(&src, label, true, &mut log);
+    write_log(dump, &log);
+    Ok(entry)
 }
 
 /// Walk the top level of a crossing dump and route each group into place.
 pub fn import_received(dump: &Path) -> ImportReport {
     let mut entries: Vec<ImportEntry> = Vec::new();
+    let mut log: Vec<LogRow> = Vec::new();
 
     let known: [(&str, Option<PathBuf>); 6] = [
         ("Documents", dirs::document_dir()),
@@ -265,6 +370,7 @@ pub fn import_received(dump: &Path) -> ImportReport {
                     action: "error".into(),
                     count: 0,
                     detail: Some(e.to_string()),
+                    browser_label: None,
                 }],
             }
         }
@@ -277,24 +383,29 @@ pub fn import_received(dump: &Path) -> ImportReport {
         }
         let name = e.file_name().to_string_lossy().to_string();
 
+        // Backup\ holds pre-overwrite originals from earlier runs — never re-import
+        if name == "Backup" {
+            continue;
+        }
         if name == "Browser" {
             let Ok(browsers) = fs::read_dir(&p) else { continue };
             for b in browsers.filter_map(|b| b.ok()).filter(|b| b.path().is_dir()) {
                 let label = b.file_name().to_string_lossy().to_string();
-                entries.push(import_browser(&b.path(), &label));
+                entries.push(import_browser(&b.path(), &label, false, &mut log));
             }
             continue;
         }
 
         match known.iter().find(|(l, _)| *l == name) {
             Some((label, Some(target))) => {
-                entries.push(import_folder(&p, target, label, None));
+                entries.push(import_folder(&p, target, label, None, &mut log));
             }
             Some((label, None)) => entries.push(ImportEntry {
                 label: label.to_string(),
                 action: "error".into(),
                 count: 0,
                 detail: Some("couldn't resolve this folder on the new PC".into()),
+                browser_label: None,
             }),
             // custom folder from the sender's picker → Documents\<name>
             None => {
@@ -305,10 +416,12 @@ pub fn import_received(dump: &Path) -> ImportReport {
                     &target,
                     &name,
                     Some(format!("→ Documents\\{name}")),
+                    &mut log,
                 ));
             }
         }
     }
 
+    write_log(dump, &log);
     ImportReport { entries }
 }

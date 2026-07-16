@@ -5,6 +5,7 @@
  */
 import type {
   AdapterInfo,
+  ImportEntry,
   ImportReport,
   LinkStatus,
   Peer,
@@ -47,6 +48,8 @@ export interface Backend {
   receive(onPeer: PeerCb, onProgress: ProgressCb): Promise<string>;
   /** RECEIVE side: move a finished crossing into the real folders / browsers. */
   importReceived(dir: string): Promise<ImportReport>;
+  /** RECEIVE side: force one browser's import ("Overwrite?"), backing up originals first. */
+  importBrowserOverwrite(dir: string, label: string): Promise<ImportEntry>;
   cancel(): Promise<void>;
   /** Add a Windows Firewall allow-rule for WINC on all profiles (UAC prompt). */
   allowFirewall(): Promise<void>;
@@ -113,6 +116,9 @@ function tauriBackend(): Backend {
     },
     importReceived(dir) {
       return invoke("import_received", { dir });
+    },
+    importBrowserOverwrite(dir, label) {
+      return invoke("import_browser_overwrite", { dir, label });
     },
     cancel() {
       return invoke("cancel");
@@ -217,12 +223,22 @@ function mockBackend(): Backend {
       await sleep(1500);
       return {
         entries: [
-          { label: "Documents", action: "imported" as const, count: 12840, detail: "3 kept both" },
-          { label: "Desktop", action: "imported" as const, count: 214, detail: null },
-          { label: "Pictures", action: "imported" as const, count: 9021, detail: null },
-          { label: "Tax Stuff", action: "imported" as const, count: 96, detail: "→ Documents\\Tax Stuff" },
-          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — sign in and sync instead." },
+          { label: "Documents", action: "imported" as const, count: 12840, detail: "3 kept both", browserLabel: null },
+          { label: "Desktop", action: "imported" as const, count: 214, detail: null, browserLabel: null },
+          { label: "Pictures", action: "imported" as const, count: 9021, detail: null, browserLabel: null },
+          { label: "Tax Stuff", action: "imported" as const, count: 96, detail: "→ Documents\\Tax Stuff", browserLabel: null },
+          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — sign in and sync instead.", browserLabel: "Chrome" },
         ],
+      };
+    },
+    async importBrowserOverwrite(_dir, label) {
+      await sleep(1200);
+      return {
+        label: `${label} (browser)`,
+        action: "imported" as const,
+        count: 6,
+        detail: `overwrote 6 — originals in C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000\\Backup\\${label}`,
+        browserLabel: label,
       };
     },
     async cancel() {

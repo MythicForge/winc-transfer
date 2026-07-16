@@ -427,6 +427,12 @@
 .import__badge--err {
   color: var(--danger, #b3423f);
 }
+.import__overwrite {
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--danger, #b3423f);
+  border-color: var(--danger, #b3423f);
+}
 
 .totals {
   display: flex;

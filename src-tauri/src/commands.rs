@@ -203,6 +203,26 @@ pub async fn import_received(dir: String) -> Result<crate::import::ImportReport,
     .await
 }
 
+/// "Overwrite?" for one browser whose import was skipped as not-fresh.
+/// Backs the new PC's existing files up to <dump>\Backup\<Label>\ first.
+#[tauri::command]
+pub async fn import_browser_overwrite(
+    dir: String,
+    label: String,
+) -> Result<crate::import::ImportEntry, String> {
+    blocking(move || {
+        let p = std::path::PathBuf::from(&dir);
+        let base = dirs::document_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("WINC Received");
+        if !p.starts_with(&base) || !p.is_dir() {
+            return Err("not a WINC received folder".into());
+        }
+        crate::import::overwrite_browser(&p, &label)
+    })
+    .await
+}
+
 /// Add a Windows Firewall allow-rule for this exe on ALL profiles. The direct
 /// cable comes up as an "Unidentified network", which Windows puts on the
 /// Public profile — where inbound is blocked by default and the standard

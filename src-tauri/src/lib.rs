@@ -35,6 +35,7 @@ pub fn run() {
             commands::cancel,
             commands::allow_firewall,
             commands::import_received,
+            commands::import_browser_overwrite,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

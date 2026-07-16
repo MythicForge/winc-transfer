@@ -19,6 +19,7 @@ export default function DoneStep() {
   const [report, setReport] = useState<ImportReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [overwriting, setOverwriting] = useState<string | null>(null);
 
   function runImport() {
     if (!state.receivedDir) return;
@@ -29,6 +30,22 @@ export default function DoneStep() {
       .then(setReport)
       .catch((e) => setErr(String(e)))
       .finally(() => setBusy(false));
+  }
+
+  function runOverwrite(label: string) {
+    if (!state.receivedDir || overwriting) return;
+    setOverwriting(label);
+    backend
+      .importBrowserOverwrite(state.receivedDir, label)
+      .then((updated) =>
+        setReport((r) =>
+          r
+            ? { entries: r.entries.map((en) => (en.browserLabel === label ? updated : en)) }
+            : r,
+        ),
+      )
+      .catch((e) => setErr(String(e)))
+      .finally(() => setOverwriting(null));
   }
 
   return (
@@ -86,13 +103,28 @@ export default function DoneStep() {
                   style={{ display: "flex", gap: 10, alignItems: "baseline", padding: "6px 0", borderBottom: "1px solid var(--line, rgba(0,0,0,.06))" }}
                 >
                   <b style={{ minWidth: 140 }}>{en.label}</b>
-                  <span className={`import__badge ${ACTION_BADGE[en.action].cls}`}>
-                    {ACTION_BADGE[en.action].text}
-                  </span>
+                  {en.action === "skipped-not-fresh" && en.browserLabel ? (
+                    <button
+                      className="btn btn--ghost import__overwrite"
+                      disabled={overwriting !== null}
+                      onClick={() => runOverwrite(en.browserLabel!)}
+                      title={`Replace ${en.browserLabel}'s data with the old PC's. Current files are backed up to the WINC Received folder first.`}
+                    >
+                      {overwriting === en.browserLabel ? "Overwriting…" : "Overwrite?"}
+                    </button>
+                  ) : (
+                    <span className={`import__badge ${ACTION_BADGE[en.action].cls}`}>
+                      {ACTION_BADGE[en.action].text}
+                    </span>
+                  )}
                   {en.count > 0 && <span style={{ color: "var(--ink-2)" }}>{count(en.count)} files</span>}
                   {en.detail && <span style={{ color: "var(--ink-2)", fontSize: 13 }}>{en.detail}</span>}
                 </div>
               ))}
+              <p style={{ color: "var(--slate, var(--ink-2))", fontSize: 12, margin: "10px 0 0" }}>
+                A snapshot log of every file (source → destination) was saved as{" "}
+                <span className="mono">import-log-*.json</span> in the WINC Received folder.
+              </p>
             </div>
           )}
         </div>
