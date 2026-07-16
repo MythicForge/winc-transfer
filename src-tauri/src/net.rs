@@ -12,31 +12,94 @@ const BUF: usize = 256 * 1024;
 
 /* ---------------- link detection ---------------- */
 
-/// Windows: hardware description for the adapter that owns `ip` ("Thunderbolt(TM)
-/// Networking", "USB4 Net Adapter", ...). if-addrs only reports the friendly name
-/// ("Ethernet 3"), which says nothing about the hardware, so name-based cable
-/// detection never fires without this.
+/// Classify an adapter from its friendly name + hardware description.
+/// Returns (named_cable, kind).
+fn classify(hay: &str, link_local: bool) -> (bool, &'static str) {
+    let named_cable = hay.contains("thunderbolt")
+        || hay.contains("usb4")
+        || hay.contains("usb 4")
+        || hay.contains("p2p") // "USB4(TM) P2P Networking Adapter"
+        || hay.contains("bridge");
+    let kind = if hay.contains("thunderbolt") {
+        "thunderbolt"
+    } else if hay.contains("usb4") || hay.contains("usb 4") {
+        "usb4"
+    } else if link_local || named_cable {
+        "other"
+    } else {
+        "network"
+    };
+    (named_cable, kind)
+}
+
+/// Every adapter with a classification, for detection + UI.
+///
+/// Windows enumerates via `ipconfig::get_adapters()` (GetAdaptersAddresses), NOT
+/// if-addrs: if-addrs only yields adapters that already hold an IPv4 address,
+/// and the direct-cable adapter (Thunderbolt/USB4 P2P) spends its first
+/// ~5–30 s after link-up IPv6-only while Windows' DHCP discovery times out and
+/// APIPA kicks in — during which the cable was invisible to us even though
+/// Network Connections showed it "up". A named cable adapter with no IPv4 yet
+/// is reported with `ip: ""` so the UI can show "cable detected, waiting for
+/// address" instead of nothing.
 #[cfg(windows)]
-fn description_for(ip: &Ipv4Addr) -> Option<String> {
-    let adapters = ipconfig::get_adapters().ok()?;
+pub fn list_adapters() -> Vec<AdapterInfo> {
+    let mut out: Vec<AdapterInfo> = Vec::new();
+    let adapters = match ipconfig::get_adapters() {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
     for a in adapters {
-        let owns = a.ip_addresses().iter().any(|x| match x {
-            std::net::IpAddr::V4(v4) => v4 == ip,
-            _ => false,
-        });
-        if owns {
-            return Some(a.description().to_string());
+        if a.oper_status() != ipconfig::OperStatus::IfOperStatusUp {
+            continue;
         }
+        let desc = a.description().to_string();
+        let friendly = a.friendly_name().to_string();
+        let hay = format!("{} {}", friendly, desc).to_lowercase();
+        if hay.contains("loopback") {
+            continue;
+        }
+        // first IPv4, preferring APIPA 169.254/16 — the direct-cable signature
+        // (no DHCP on the cable, so Windows self-assigns)
+        let mut v4: Option<Ipv4Addr> = None;
+        for ip in a.ip_addresses() {
+            if let std::net::IpAddr::V4(x) = ip {
+                if x.is_loopback() {
+                    continue;
+                }
+                let apipa = x.octets()[0] == 169 && x.octets()[1] == 254;
+                if apipa {
+                    v4 = Some(*x);
+                    break;
+                }
+                if v4.is_none() {
+                    v4 = Some(*x);
+                }
+            }
+        }
+        let link_local = matches!(v4, Some(ip) if ip.octets()[0] == 169 && ip.octets()[1] == 254);
+        let (named_cable, kind) = classify(&hay, link_local);
+        if v4.is_none() && !named_cable {
+            continue; // IPv4-less ordinary adapters are noise
+        }
+        let name = if desc.is_empty() || desc == friendly {
+            friendly
+        } else {
+            format!("{} — {}", friendly, desc)
+        };
+        out.push(AdapterInfo {
+            name,
+            ip: v4.map(|x| x.to_string()).unwrap_or_default(),
+            link_local,
+            cable: link_local || named_cable,
+            kind: kind.into(),
+        });
     }
-    None
+    out
 }
 
+/// Non-Windows fallback (dev/mock only): if-addrs, IPv4 adapters.
 #[cfg(not(windows))]
-fn description_for(_ip: &Ipv4Addr) -> Option<String> {
-    None
-}
-
-/// Every non-loopback IPv4 adapter with a classification, for detection + UI.
 pub fn list_adapters() -> Vec<AdapterInfo> {
     let mut out: Vec<AdapterInfo> = Vec::new();
     let ifaces = match if_addrs::get_if_addrs() {
@@ -49,34 +112,13 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
         }
         let ip = match i.ip() {
             std::net::IpAddr::V4(v4) => v4,
-            _ => continue, // IPv6 entries are listed separately by if-addrs; skip
+            _ => continue,
         };
-        let desc = description_for(&ip).unwrap_or_default();
-        // classify on friendly name AND hardware description
-        let hay = format!("{} {}", i.name, desc).to_lowercase();
-        // Windows "Direct Cable Networking" (Thunderbolt/USB4 Net) has no DHCP, so
-        // it self-assigns an APIPA 169.254/16 address — that is the strongest signal.
+        let hay = i.name.to_lowercase();
         let link_local = ip.octets()[0] == 169 && ip.octets()[1] == 254;
-        let named_cable = hay.contains("thunderbolt")
-            || hay.contains("usb4")
-            || hay.contains("usb 4")
-            || hay.contains("bridge");
-        let kind = if hay.contains("thunderbolt") {
-            "thunderbolt"
-        } else if hay.contains("usb4") || hay.contains("usb 4") {
-            "usb4"
-        } else if link_local || named_cable {
-            "other"
-        } else {
-            "network"
-        };
-        let name = if desc.is_empty() || desc == i.name {
-            i.name.clone()
-        } else {
-            format!("{} — {}", i.name, desc)
-        };
+        let (named_cable, kind) = classify(&hay, link_local);
         out.push(AdapterInfo {
-            name,
+            name: i.name.clone(),
             ip: ip.to_string(),
             link_local,
             cable: link_local || named_cable,
@@ -94,12 +136,15 @@ pub fn link_status() -> LinkStatus {
     let pick = adapters
         .iter()
         .find(|a| a.link_local)
+        .or_else(|| adapters.iter().find(|a| a.cable && !a.ip.is_empty()))
+        // cable adapter with no IPv4 yet: not usable (up: false), but surfaced
+        // so the UI can show "cable detected, waiting for an address"
         .or_else(|| adapters.iter().find(|a| a.cable));
     match pick {
         Some(a) => LinkStatus {
-            up: true,
+            up: !a.ip.is_empty(),
             adapter: Some(a.name.clone()),
-            local_ip: Some(a.ip.clone()),
+            local_ip: if a.ip.is_empty() { None } else { Some(a.ip.clone()) },
             kind: Some(a.kind.clone()),
         },
         None => LinkStatus::default(),
@@ -112,8 +157,8 @@ fn local_ip() -> Option<Ipv4Addr> {
     let chosen = adapters
         .iter()
         .find(|a| a.link_local)
-        .or_else(|| adapters.iter().find(|a| a.cable))
-        .or_else(|| adapters.first());
+        .or_else(|| adapters.iter().find(|a| a.cable && !a.ip.is_empty()))
+        .or_else(|| adapters.iter().find(|a| !a.ip.is_empty()));
     chosen.and_then(|a| a.ip.parse().ok())
 }
 
@@ -457,7 +502,7 @@ pub fn local_ipv4s() -> Vec<String> {
     adapters.sort_by_key(|a| if a.link_local { 0 } else if a.cable { 1 } else { 2 });
     let mut out: Vec<String> = Vec::new();
     for a in adapters {
-        if !out.contains(&a.ip) {
+        if !a.ip.is_empty() && !out.contains(&a.ip) {
             out.push(a.ip);
         }
     }

@@ -1,6 +1,6 @@
 # WINC — Direct-Cable PC Data Crossing
 
-**Version 0.4.0**
+**Version 0.4.1**
 
 Move files and browser data from an **old Windows PC** to a **new one** over a
 single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
@@ -157,7 +157,16 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 
 ## Version notes
 
-**0.4.0** (current)
+**0.4.1** (current)
+- Cable detection fix: adapters are now enumerated via `GetAdaptersAddresses`
+  (ipconfig crate) instead of if-addrs, which only reported adapters that
+  already held an IPv4 address — the Thunderbolt/USB4 P2P adapter is IPv6-only
+  for its first ~5–30 s after link-up (DHCP timeout before APIPA), so the
+  plugged-in cable was invisible. The UI now shows "cable detected, waiting
+  for address" during that window, plus a manual static-IP tip if APIPA never
+  arrives.
+
+**0.4.0**
 - End-to-end encryption: SPAKE2 pairing-code handshake + ChaCha20-Poly1305
   framed transport, always on (`crypto.rs`).
 - Browser support expanded from 3 to 12: added Brave, Vivaldi, Chromium,

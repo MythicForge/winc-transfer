@@ -56,6 +56,15 @@ export default function ConnectStep() {
                 <span className="mono">{state.link.localIp}</span>
               </span>
             </>
+          ) : state.link.adapter ? (
+            // cable adapter is up, but Windows hasn't assigned its IPv4 yet
+            <>
+              <span className="spinner" />
+              <span>
+                Cable detected on <b>{state.link.adapter}</b> — waiting for Windows to assign its{" "}
+                <span className="mono">169.254.x.x</span> address (DHCP timeout, up to ~30 s)…
+              </span>
+            </>
           ) : (
             <>
               <span className="spinner" />
@@ -93,7 +102,7 @@ export default function ConnectStep() {
             {adapters.map((a) => (
               <div key={a.name + a.ip} className={`adapter${a.cable ? " adapter--cable" : ""}`}>
                 <span className="adapter__name">{a.name}</span>
-                <span className="mono adapter__ip">{a.ip}</span>
+                <span className="mono adapter__ip">{a.ip || "no IPv4 yet"}</span>
                 <span className={`adapter__tag${a.cable ? " adapter__tag--cable" : ""}`}>
                   {a.linkLocal ? "direct cable" : a.cable ? "cable" : "network"}
                 </span>
@@ -106,6 +115,15 @@ export default function ConnectStep() {
             No cable adapter yet. If the cable is plugged in, wait a moment for its{" "}
             <span className="mono">169.254</span> address, or enable “Thunderbolt Networking” in
             Windows settings.
+          </p>
+        )}
+        {!up && cableAdapters.some((a) => !a.ip) && (
+          <p className="field-warn" style={{ marginTop: 12 }}>
+            Cable adapter is up but has no IPv4 address yet. If it stays that way past a minute,
+            give it one by hand: Settings → Network → the cable adapter → “Edit IP assignment” →
+            Manual, IPv4 on — use <span className="mono">169.254.1.1</span> on one PC and{" "}
+            <span className="mono">169.254.1.2</span> on the other, mask{" "}
+            <span className="mono">255.255.0.0</span>, no gateway.
           </p>
         )}
 
