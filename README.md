@@ -1,8 +1,10 @@
 # WINC — Direct-Cable PC Data Crossing
 
+**Version 0.4.0**
+
 Move files and browser data from an **old Windows PC** to a **new one** over a
-single Thunderbolt / USB4 cable. No cloud, no accounts, no router — the data
-crosses the wire directly.
+single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
+accounts — the data crosses the wire directly, **end-to-end encrypted**.
 
 Built with **Tauri v2** (Rust core + a React/TypeScript UI).
 
@@ -19,29 +21,42 @@ segment (usually `169.254.x.x`). WINC rides that link:
   ┌───────────────┐   UDP beacon  ◄──── broadcasts { name, tcp_port }
   │ discover_peer │
   │      ↓        │   TCP connect  ────► accept
-  │  pair (code)  │   Hello{code}  ────► verify, HelloAck
-  │      ↓        │   Manifest     ────► create dest tree
-  │  start_send   │   file bytes   ────► write files, emit progress
+  │  pair (code)  │   SPAKE2(code) ◄──► PAKE handshake -> session keys
+  │      ↓        │   Manifest     ────► create dest tree   (encrypted)
+  │  start_send   │   file frames  ────► write files, emit progress
   └───────────────┘                     Documents\WINC Received\crossing-<ts>\
 ```
 
 - **Discover** — receiver broadcasts a UDP beacon on port `50737`; sender listens.
-- **Pair** — new PC shows a 6-digit code; old PC types it. Verified over TCP
-  before any data moves. The connection stays open from pairing through transfer.
+- **Pair** — new PC shows a 6-digit code; old PC types it. The code drives a
+  **SPAKE2** handshake over TCP before any data moves; a wrong code fails the
+  handshake cleanly. The connection stays open from pairing through transfer.
 - **No cable?** The sender can skip discovery and **enter the new PC's IP** by
   hand (any Wi-Fi / Ethernet network). The receiver shows its IP(s); the TCP port
   is fixed at `50738`, so only the IP is needed.
-- **Transfer** — length-declared manifest, then raw file streams. Progress is
-  emitted to the UI (`winc://progress`) from whichever side is doing the I/O.
+- **Encrypt** — everything after the handshake travels in length-prefixed
+  **ChaCha20-Poly1305** AEAD frames with per-direction keys (HKDF-SHA256 from
+  the PAKE shared secret). Always on — cable and network alike, no downgrade.
+- **Transfer** — length-declared manifest, then chunked file frames (an empty
+  frame ends each file, so unreadable files skip cleanly mid-stream). Progress
+  is emitted to the UI (`winc://progress`) from whichever side is doing the I/O.
 
-Source of truth for the wire protocol: `src-tauri/src/model.rs` and `net.rs`.
+Source of truth for the wire protocol: `src-tauri/src/model.rs`, `net.rs`, and
+`crypto.rs`; design rationale in `ENCRYPTION_PLAN.md`.
 
 ## What transfers
 
 - **Folders** — Documents, Desktop, Pictures, Downloads, Music, Videos, plus any
   folder you add. Sizes are measured live.
-- **Browser data** — Chrome / Edge / Firefox bookmarks & history, and (opt-in)
-  saved passwords.
+- **Browser data** — bookmarks & history, and (opt-in) saved passwords, from
+  **12 browsers**:
+  - Chromium family: Chrome, Edge, Brave, Vivaldi, Chromium
+  - Opera family: Opera, Opera GX
+  - Gecko family: Firefox, Zen, LibreWolf, Waterfox, Floorp
+
+> ☁ **OneDrive cloud-only files** ("available online-only" placeholders) can't
+> be read without hydrating them. WINC skips them cleanly mid-transfer instead
+> of aborting the crossing.
 
 > ⚠ **Saved passwords are DPAPI-bound.** Chrome/Edge encrypt them against the
 > Windows account. The files copy fine but only decrypt if you sign into the new
@@ -67,6 +82,7 @@ src/                     React UI (the "Signal Bench" design)
 src-tauri/src/
   model.rs               wire types + progress
   net.rs                 link detection, UDP discovery, TCP transfer
+  crypto.rs              SPAKE2 handshake + ChaCha20-Poly1305 framed transport
   sources.rs             enumerate + expand folders / browser data
   commands.rs            #[tauri::command]s + session state
   lib.rs                 app builder + handler registration
@@ -115,24 +131,49 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 2. Windows brings up a **Thunderbolt Networking** / **USB4 Net** adapter
    automatically. If not, enable it in the Thunderbolt Control Center / network
    adapter settings.
-3. Allow WINC through **Windows Firewall** on Private networks (UDP `50737` for
-   discovery, TCP `50738` for transfer). Approve the prompt on first run.
+3. Allow WINC through **Windows Firewall** (UDP `50737` for discovery, TCP
+   `50738` for transfer). Windows classes the cable link as an *Unidentified*
+   (Public) network, where the standard first-run prompt (Private-only) doesn't
+   help — if the PCs never find each other, use the **"Allow WINC through the
+   firewall"** button on the Connect step; it adds an all-profiles rule via one
+   UAC prompt.
 4. Run WINC on both PCs — **Send** on the old one, **Receive** on the new one.
 
 ---
 
 ## Security notes
 
-- Traffic is unencrypted — acceptable because it never leaves a physical
-  point-to-point cable. If you later route this over shared networks, add TLS
-  (e.g. `rustls`) and derive a key from the pairing code.
-- The 6-digit code prevents pairing with the wrong machine; it is not a
-  cryptographic secret.
+- **All traffic is end-to-end encrypted, always** — cable and network alike.
+  The 6-digit pairing code feeds a **SPAKE2** PAKE (the Magic Wormhole design),
+  so a captured handshake cannot be brute-forced offline; a wrong code allows
+  exactly one online guess per connection. The derived secret is split via
+  HKDF-SHA256 into per-direction ChaCha20-Poly1305 keys with counter nonces —
+  no key/nonce reuse across directions. Frame length is capped at 64 MB and the
+  handshake has a 10 s read timeout.
 - Incoming paths are sanitized (`net::safe_join`) so a manifest cannot write
   outside the destination folder.
+- Saved-password files remain DPAPI-bound to the Windows account (see warning
+  above) — WINC never decrypts them itself.
+
+## Version notes
+
+**0.4.0** (current)
+- End-to-end encryption: SPAKE2 pairing-code handshake + ChaCha20-Poly1305
+  framed transport, always on (`crypto.rs`).
+- Browser support expanded from 3 to 12: added Brave, Vivaldi, Chromium,
+  Opera, Opera GX, Zen, LibreWolf, Waterfox, Floorp.
+- Cable patch: one-click "Allow WINC through the firewall" (all profiles,
+  fixes the Unidentified/Public-network block that broke discovery).
+- OneDrive patch: chunked file framing; cloud-only placeholders and other
+  unreadable files skip cleanly mid-transfer.
+- Receiver fix: "Start over" now unblocks the accept loop, stops the beacon,
+  and clears leftover session state, so re-pairing works.
+
+**0.1.0** — initial release: Thunderbolt/USB4 direct-cable transfer, UDP
+discovery, 6-digit pairing, manual-IP fallback, Chrome/Edge/Firefox data.
 
 ## Status
 
 Frontend: complete, typechecks, builds. Rust core: complete and written to
-standard APIs, **pending a compile/run on Windows** (no Rust toolchain on the
-authoring box). Next: `npm run tauri dev` on two Windows PCs wired together.
+standard APIs; compile/run happens on the Windows build machine (no Rust
+toolchain on the authoring box).
