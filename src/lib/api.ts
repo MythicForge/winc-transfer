@@ -140,9 +140,8 @@ function mockBackend(): Backend {
     { id: "desktop", label: "Desktop", hint: "C:\\Users\\you\\Desktop", kind: "folder", path: "Desktop", bytes: 640_000_000, items: 214, selected: true },
     { id: "pictures", label: "Pictures", hint: "C:\\Users\\you\\Pictures", kind: "folder", path: "Pictures", bytes: 18_200_000_000, items: 9021, selected: true },
     { id: "downloads", label: "Downloads", hint: "C:\\Users\\you\\Downloads", kind: "folder", path: "Downloads", bytes: 7_100_000_000, items: 512, selected: false },
-    { id: "chrome", label: "Chrome — bookmarks & history", hint: "Default profile", kind: "browser", path: null, bytes: 210_000_000, items: 6, selected: true },
-    { id: "edge", label: "Edge — bookmarks & history", hint: "Default profile", kind: "browser", path: null, bytes: 88_000_000, items: 6, selected: false },
-    { id: "chrome-pw", label: "Chrome — saved passwords", hint: "Default profile", kind: "browser", path: null, bytes: 400_000, items: 74, caveat: "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.", selected: false },
+    { id: "chrome", label: "Chrome — bookmarks, history & passwords", hint: "Default profile", kind: "browser", path: null, bytes: 210_400_000, items: 9, caveat: "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.", selected: true },
+    { id: "edge", label: "Edge — bookmarks, history & passwords", hint: "Default profile", kind: "browser", path: null, bytes: 88_400_000, items: 9, caveat: "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.", selected: false },
   ];
 
   return {

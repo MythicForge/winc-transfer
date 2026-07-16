@@ -269,17 +269,6 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         }
     };
 
-    // fresh check: any incoming name already present ⇒ skip, unless forced
-    if !force && files.iter().any(|(_, name)| dest_for(name).exists()) {
-        return entry(
-            "skipped-not-fresh",
-            0,
-            Some(format!(
-                "{label} already has data on this PC — sign in and sync instead."
-            )),
-        );
-    }
-
     // fail-safe: snapshot the new PC's originals before any overwrite
     let backup_dir = src
         .parent() // .../Browser
@@ -287,9 +276,20 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         .map(|d| d.join("Backup").join(label));
     let mut backed_up = 0u64;
 
+    // Per-file, not per-group: copy the files that are genuinely missing on the
+    // new PC; leave the ones that already exist untouched (unless forced via the
+    // "Overwrite?" action). The old code skipped the *entire* browser if any one
+    // file already existed, so a browser opened even once on the new PC imported
+    // nothing — passwords included.
     let mut copied = 0u64;
+    let mut skipped = 0u64;
     for (path, name) in &files {
         let dest = dest_for(name);
+        if dest.exists() && !force {
+            skipped += 1;
+            log_row(log, path, &dest, "skipped-exists");
+            continue;
+        }
         if force && dest.exists() {
             if let Some(bdir) = &backup_dir {
                 let bpath = bdir.join(name);
@@ -322,16 +322,36 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         log_row(log, path, &dest, if overwrote { "overwrote" } else { "copied" });
         copied += 1;
     }
-    let detail = (backed_up > 0).then(|| {
-        format!(
+
+    // Nothing new to add and files already present ⇒ still report as
+    // not-fresh so the UI can offer "Overwrite?" (which backs up first).
+    if copied == 0 && skipped > 0 {
+        return entry(
+            "skipped-not-fresh",
+            0,
+            Some(format!(
+                "{label} already has this data — use Overwrite to replace it (originals are backed up first)."
+            )),
+        );
+    }
+    let mut details: Vec<String> = Vec::new();
+    if skipped > 0 {
+        details.push(format!("{skipped} already present, kept"));
+    }
+    if backed_up > 0 {
+        details.push(format!(
             "overwrote {backed_up} — originals in {}",
             backup_dir
                 .as_deref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "Backup".into())
-        )
-    });
-    entry("imported", copied, detail)
+        ));
+    }
+    entry(
+        "imported",
+        copied,
+        (!details.is_empty()).then(|| details.join(" · ")),
+    )
 }
 
 /// Force-import a single browser's received data (the UI's "Overwrite?" —

@@ -74,13 +74,11 @@ const CHROMIUM_PASSWORDS: &[&str] = &["Login Data", "Login Data For Account"];
 /// main group instead of a separate DPAPI-caveat group.
 const GECKO_FILES: &[&str] = &["places.sqlite", "favicons.sqlite", "logins.json", "key4.db"];
 
-/// The specific files that make up a browser group, as (abs, rel).
-/// Ids: the table id for bookmarks/history, or "<id>-pw" for saved passwords.
+/// The specific files that make up a browser group, as (abs, rel). Each group
+/// carries bookmarks/history AND saved logins: Chromium/Opera add Login Data +
+/// Local State, Gecko bundles logins.json + key4.db via GECKO_FILES.
 fn browser_files(id: &str) -> Vec<Item> {
-    let (base_id, pw) = match id.strip_suffix("-pw") {
-        Some(b) => (b, true),
-        None => (id, false),
-    };
+    let base_id = id;
     let mut out = Vec::new();
     let mut add = |base: &Path, rel_root: &str, names: &[&str]| {
         for n in names {
@@ -112,12 +110,9 @@ fn browser_files(id: &str) -> Vec<Item> {
         } else {
             root.clone()
         };
-        if pw {
-            add(&profile, label, CHROMIUM_PASSWORDS);
-            add(&root, label, &["Local State"]); // holds the DPAPI-wrapped key
-        } else {
-            add(&profile, label, CHROMIUM_HISTORY);
-        }
+        add(&profile, label, CHROMIUM_HISTORY);
+        add(&profile, label, CHROMIUM_PASSWORDS);
+        add(&root, label, &["Local State"]); // holds the DPAPI-wrapped key
         return out;
     }
 
@@ -176,23 +171,25 @@ pub fn list_sources() -> Vec<SourceGroup> {
         }
     }
 
-    // Every browser from the catalog that actually exists on this PC:
-    // bookmarks & history for all three families, then saved-password groups
-    // for the Chromium-family ones (Gecko logins travel with the main group).
+    // Every browser from the catalog that actually exists on this PC. Each
+    // group now carries bookmarks, history AND saved logins in one checkbox
+    // (matching how Gecko already bundled its logins), so passwords ride along
+    // instead of sitting in a separate opt-in group the user had to find.
+    // Chromium/Opera keep the DPAPI caveat; Gecko logins are portable.
     let mut browsers: Vec<(String, String, Option<&str>, bool)> = Vec::new();
-    for (id, label, _) in CHROMIUM_BROWSERS.iter().chain(OPERA_BROWSERS).chain(GECKO_BROWSERS) {
+    for (id, label, _) in CHROMIUM_BROWSERS.iter().chain(OPERA_BROWSERS) {
         browsers.push((
             id.to_string(),
-            format!("{label} — bookmarks & history"),
-            None,
+            format!("{label} — bookmarks, history & passwords"),
+            Some(PW_CAVEAT),
             *id == "chrome",
         ));
     }
-    for (id, label, _) in CHROMIUM_BROWSERS.iter().chain(OPERA_BROWSERS) {
+    for (id, label, _) in GECKO_BROWSERS.iter() {
         browsers.push((
-            format!("{id}-pw"),
-            format!("{label} — saved passwords"),
-            Some(PW_CAVEAT),
+            id.to_string(),
+            format!("{label} — bookmarks, history & passwords"),
+            None,
             false,
         ));
     }
