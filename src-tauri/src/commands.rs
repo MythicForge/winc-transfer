@@ -6,7 +6,22 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Run blocking net/disk work off Tauri's main thread. Sync commands run ON
+/// the main thread in Tauri v2 — a command that blocks (accept loop, transfer,
+/// folder-size scan, UAC wait) freezes the whole window ("Not Responding") and
+/// stalls event delivery to the UI, so every long-running command must hop
+/// through here.
+async fn blocking<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+}
 
 /// Shared session state, managed by Tauri.
 #[derive(Default)]
@@ -78,8 +93,8 @@ pub fn start_receiver(name: String, state: State<'_, Session>) -> Result<Receive
 }
 
 #[tauri::command]
-pub fn discover_peer() -> Option<Peer> {
-    net::discover(Duration::from_secs(10))
+pub async fn discover_peer() -> Result<Option<Peer>, String> {
+    blocking(|| Ok(net::discover(Duration::from_secs(10)))).await
 }
 
 /// All IPv4 addresses on this PC (direct-cable link first), for manual pairing.
@@ -89,75 +104,84 @@ pub fn list_local_ips() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn pair(peer: Peer, code: String, state: State<'_, Session>) -> Result<(), String> {
-    let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
-    let name = net::host_name("This PC");
-    let stream = net::connect_and_pair(&peer, &name, &digits).map_err(|e| e.to_string())?;
-    *state.send_stream.lock().unwrap() = Some(stream);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn list_sources() -> Vec<SourceGroup> {
-    sources::list_sources()
-}
-
-#[tauri::command]
-pub fn start_send(
-    group_ids: Vec<String>,
-    app: AppHandle,
-    state: State<'_, Session>,
-) -> Result<(), String> {
-    state.cancel.store(false, Ordering::Relaxed);
-    let mut stream = state
-        .send_stream
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or("not paired — pair with the new PC first")?;
-
-    let mut items = Vec::new();
-    for id in &group_ids {
-        items.extend(sources::expand(id));
-    }
-
-    let cancel = state.cancel.clone();
-    let emit = emitter(&app);
-    net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
-        let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
-        e.to_string()
+pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String> {
+    blocking(move || {
+        let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+        let name = net::host_name("This PC");
+        let stream = net::connect_and_pair(&peer, &name, &digits).map_err(|e| e.to_string())?;
+        let state = app.state::<Session>();
+        *state.send_stream.lock().unwrap() = Some(stream);
+        Ok(())
     })
+    .await
 }
 
 #[tauri::command]
-pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> {
-    state.cancel.store(false, Ordering::Relaxed);
-    let listener = state
-        .listener
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or("receiver not started")?;
-    let code = state.code.lock().unwrap().clone().unwrap_or_default();
-    let cancel = state.cancel.clone();
+pub async fn list_sources() -> Result<Vec<SourceGroup>, String> {
+    // measures folder sizes on disk — can take seconds on a big Documents
+    blocking(|| Ok(sources::list_sources())).await
+}
 
-    let (mut stream, peer) =
-        net::accept_and_verify(&listener, &code, &cancel).map_err(|e| e.to_string())?;
-    let _ = app.emit("winc://paired", &peer);
+#[tauri::command]
+pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), String> {
+    blocking(move || {
+        let state = app.state::<Session>();
+        state.cancel.store(false, Ordering::Relaxed);
+        let mut stream = state
+            .send_stream
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or("not paired — pair with the new PC first")?;
 
-    // stop advertising once someone connected
-    if let Some(stop) = state.beacon_stop.lock().unwrap().take() {
-        stop.store(true, Ordering::Relaxed);
-    }
+        let mut items = Vec::new();
+        for id in &group_ids {
+            items.extend(sources::expand(id));
+        }
 
-    let dest = incoming_dir();
-    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-
-    let emit = emitter(&app);
-    net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
-        let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
-        e.to_string()
+        let cancel = state.cancel.clone();
+        let emit = emitter(&app);
+        net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
+            let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
+            e.to_string()
+        })
     })
+    .await
+}
+
+#[tauri::command]
+pub async fn receive(app: AppHandle) -> Result<(), String> {
+    blocking(move || {
+        let state = app.state::<Session>();
+        state.cancel.store(false, Ordering::Relaxed);
+        let listener = state
+            .listener
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or("receiver not started")?;
+        let code = state.code.lock().unwrap().clone().unwrap_or_default();
+        let cancel = state.cancel.clone();
+
+        let (mut stream, peer) =
+            net::accept_and_verify(&listener, &code, &cancel).map_err(|e| e.to_string())?;
+        let _ = app.emit("winc://paired", &peer);
+
+        // stop advertising once someone connected
+        if let Some(stop) = state.beacon_stop.lock().unwrap().take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+
+        let dest = incoming_dir();
+        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+
+        let emit = emitter(&app);
+        net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
+            let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
+            e.to_string()
+        })
+    })
+    .await
 }
 
 /// Add a Windows Firewall allow-rule for this exe on ALL profiles. The direct
@@ -167,9 +191,9 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
 /// (inbound UDP 50737) and the receiver's listener (inbound TCP 50738).
 /// Elevates via UAC; returns Err if the user declines.
 #[tauri::command]
-pub fn allow_firewall() -> Result<(), String> {
+pub async fn allow_firewall() -> Result<(), String> {
     #[cfg(windows)]
-    {
+    return blocking(|| {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.display().to_string();
         // one elevated cmd: replace any old rule, then allow this program on
@@ -190,8 +214,9 @@ pub fn allow_firewall() -> Result<(), String> {
         if !status.success() {
             return Err("Firewall rule was not added (admin prompt declined?)".into());
         }
-        return Ok(());
-    }
+        Ok(())
+    })
+    .await;
     #[cfg(not(windows))]
     return Err("Only needed on Windows".into());
 }

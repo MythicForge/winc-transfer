@@ -1,6 +1,6 @@
 # WINC — Direct-Cable PC Data Crossing
 
-**Version 0.4.1**
+**Version 0.4.2**
 
 Move files and browser data from an **old Windows PC** to a **new one** over a
 single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
@@ -157,7 +157,16 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 
 ## Version notes
 
-**0.4.1** (current)
+**0.4.2** (current)
+- UI-freeze fix: long-running commands (`receive`, `start_send`, `pair`,
+  `discover_peer`, `list_sources`, `allow_firewall`) were synchronous, and
+  Tauri v2 runs sync commands on the main thread — the receiver froze
+  ("Not Responding") from accept through the whole transfer, never rendered
+  `winc://paired`/`winc://progress`, and stayed stuck on the code screen while
+  data landed. All now `async` + `spawn_blocking`, so both windows stay live
+  and show progress.
+
+**0.4.1**
 - Cable detection fix: adapters are now enumerated via `GetAdaptersAddresses`
   (ipconfig crate) instead of if-addrs, which only reported adapters that
   already held an IPv4 address — the Thunderbolt/USB4 P2P adapter is IPv6-only
