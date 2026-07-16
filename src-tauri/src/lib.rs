@@ -31,6 +31,7 @@ pub fn run() {
             commands::start_send,
             commands::receive,
             commands::cancel,
+            commands::allow_firewall,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
