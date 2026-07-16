@@ -36,9 +36,9 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark">
-            WIN<b>C</b>
+            WINC<b>I</b>
           </span>
-          <span className="brand__tag">Direct cable crossing</span>
+          <span className="brand__tag">Cable or IP data crossing</span>
         </div>
         {state.role && (
           <button className="btn btn--ghost" onClick={reset}>
