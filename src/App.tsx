@@ -36,7 +36,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand__mark">
-            WINC<b>I</b>
+            WIN<b>CI</b>
           </span>
           <span className="brand__tag">Cable or IP data crossing</span>
         </div>
