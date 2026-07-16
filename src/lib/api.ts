@@ -44,6 +44,8 @@ export interface Backend {
   /** RECEIVE side: wait for + accept an incoming transfer; progress via cb. */
   receive(onPeer: PeerCb, onProgress: ProgressCb): Promise<void>;
   cancel(): Promise<void>;
+  /** Add a Windows Firewall allow-rule for WINC on all profiles (UAC prompt). */
+  allowFirewall(): Promise<void>;
 }
 
 /* ---------------- Tauri backend ---------------- */
@@ -107,6 +109,9 @@ function tauriBackend(): Backend {
     },
     cancel() {
       return invoke("cancel");
+    },
+    allowFirewall() {
+      return invoke("allow_firewall");
     },
   };
 }
@@ -202,6 +207,9 @@ function mockBackend(): Backend {
     },
     async cancel() {
       cancelled = true;
+    },
+    async allowFirewall() {
+      await sleep(600);
     },
   };
 }

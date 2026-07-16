@@ -12,6 +12,30 @@ const BUF: usize = 256 * 1024;
 
 /* ---------------- link detection ---------------- */
 
+/// Windows: hardware description for the adapter that owns `ip` ("Thunderbolt(TM)
+/// Networking", "USB4 Net Adapter", ...). if-addrs only reports the friendly name
+/// ("Ethernet 3"), which says nothing about the hardware, so name-based cable
+/// detection never fires without this.
+#[cfg(windows)]
+fn description_for(ip: &Ipv4Addr) -> Option<String> {
+    let adapters = ipconfig::get_adapters().ok()?;
+    for a in adapters {
+        let owns = a.ip_addresses().iter().any(|x| match x {
+            std::net::IpAddr::V4(v4) => v4 == ip,
+            _ => false,
+        });
+        if owns {
+            return Some(a.description().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn description_for(_ip: &Ipv4Addr) -> Option<String> {
+    None
+}
+
 /// Every non-loopback IPv4 adapter with a classification, for detection + UI.
 pub fn list_adapters() -> Vec<AdapterInfo> {
     let mut out: Vec<AdapterInfo> = Vec::new();
@@ -27,25 +51,32 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
             std::net::IpAddr::V4(v4) => v4,
             _ => continue, // IPv6 entries are listed separately by if-addrs; skip
         };
-        let lname = i.name.to_lowercase();
+        let desc = description_for(&ip).unwrap_or_default();
+        // classify on friendly name AND hardware description
+        let hay = format!("{} {}", i.name, desc).to_lowercase();
         // Windows "Direct Cable Networking" (Thunderbolt/USB4 Net) has no DHCP, so
         // it self-assigns an APIPA 169.254/16 address — that is the strongest signal.
         let link_local = ip.octets()[0] == 169 && ip.octets()[1] == 254;
-        let named_cable = lname.contains("thunderbolt")
-            || lname.contains("usb4")
-            || lname.contains("usb 4")
-            || lname.contains("bridge");
-        let kind = if lname.contains("thunderbolt") {
+        let named_cable = hay.contains("thunderbolt")
+            || hay.contains("usb4")
+            || hay.contains("usb 4")
+            || hay.contains("bridge");
+        let kind = if hay.contains("thunderbolt") {
             "thunderbolt"
-        } else if lname.contains("usb4") || lname.contains("usb 4") {
+        } else if hay.contains("usb4") || hay.contains("usb 4") {
             "usb4"
         } else if link_local || named_cable {
             "other"
         } else {
             "network"
         };
+        let name = if desc.is_empty() || desc == i.name {
+            i.name.clone()
+        } else {
+            format!("{} — {}", i.name, desc)
+        };
         out.push(AdapterInfo {
-            name: i.name.clone(),
+            name,
             ip: ip.to_string(),
             link_local,
             cable: link_local || named_cable,

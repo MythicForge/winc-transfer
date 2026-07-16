@@ -160,6 +160,42 @@ pub fn receive(app: AppHandle, state: State<'_, Session>) -> Result<(), String> 
     })
 }
 
+/// Add a Windows Firewall allow-rule for this exe on ALL profiles. The direct
+/// cable comes up as an "Unidentified network", which Windows puts on the
+/// Public profile — where inbound is blocked by default and the standard
+/// firewall prompt (Private-only) doesn't help. That silently kills discovery
+/// (inbound UDP 50737) and the receiver's listener (inbound TCP 50738).
+/// Elevates via UAC; returns Err if the user declines.
+#[tauri::command]
+pub fn allow_firewall() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = exe.display().to_string();
+        // one elevated cmd: replace any old rule, then allow this program on
+        // every profile (public included) for both TCP and UDP
+        let cmdline = format!(
+            "/c netsh advfirewall firewall delete rule name=\"WINC Data Crossing\" & \
+             netsh advfirewall firewall add rule name=\"WINC Data Crossing\" \
+             dir=in action=allow enable=yes profile=any protocol=any program=\"{exe}\""
+        );
+        let ps = format!(
+            "Start-Process cmd -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '{}'",
+            cmdline.replace('\'', "''")
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("Firewall rule was not added (admin prompt declined?)".into());
+        }
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    return Err("Only needed on Windows".into());
+}
+
 /// Stop whatever's in flight: unblocks the receiver's accept loop, ends any
 /// transfer, and stops the discovery beacon. Called on "Start over".
 #[tauri::command]

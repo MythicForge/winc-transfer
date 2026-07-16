@@ -1,6 +1,6 @@
 [package]
 name = "winc"
-version = "0.2.0"
+version = "0.4.0"
 description = "WINC — direct-cable PC data crossing"
 authors = ["you"]
 license = ""
@@ -33,3 +33,8 @@ spake2 = "0.4"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+# adapter hardware descriptions (Thunderbolt/USB4 detection) — if-addrs only
+# exposes the friendly name ("Ethernet 3")
+ipconfig = "0.3"
