@@ -18,7 +18,7 @@ export default function CodeStep() {
         <div className="eyebrow">Step 2 · Handshake</div>
         <h2>Read this code to the old PC</h2>
         <p>
-          On the old computer, WINC is asking for a 6-digit code. Type the numbers below over
+          On the old computer, WINCI is asking for a 6-digit code. Type the numbers below over
           there to confirm the two machines are paired.
         </p>
       </div>

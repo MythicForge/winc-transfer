@@ -51,7 +51,7 @@ export interface Backend {
   /** RECEIVE side: force one browser's import ("Overwrite?"), backing up originals first. */
   importBrowserOverwrite(dir: string, label: string): Promise<ImportEntry>;
   cancel(): Promise<void>;
-  /** Add a Windows Firewall allow-rule for WINC on all profiles (UAC prompt). */
+  /** Add a Windows Firewall allow-rule for WINCI on all profiles (UAC prompt). */
   allowFirewall(): Promise<void>;
 }
 

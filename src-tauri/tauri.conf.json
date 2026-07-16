@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "WINC",
-  "version": "0.6.0",
+  "productName": "WINCI",
+  "version": "0.6.1",
   "identifier": "com.winc.app",
   "build": {
     "frontendDist": "../dist",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "WINC — Data Crossing",
+        "title": "WINCI — Data Crossing",
         "width": 1060,
         "height": 780,
         "minWidth": 720,

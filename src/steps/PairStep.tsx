@@ -66,7 +66,7 @@ export default function PairStep() {
       setErr(
         e instanceof Error && /wrong code|mismatch/i.test(e.message)
           ? "That code didn’t match. Re-read it on the new PC."
-          : "Couldn’t reach that PC. Check the IP, that WINC is receiving, and the firewall.",
+          : "Couldn’t reach that PC. Check the IP, that WINCI is receiving, and the firewall.",
       );
     }
   }

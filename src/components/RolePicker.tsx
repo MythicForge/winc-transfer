@@ -1,17 +1,20 @@
 import { useStore } from "../store";
+import logo from "../assets/WINCI.svg";
 
 export default function RolePicker() {
   const { dispatch } = useStore();
   return (
     <div className="picker">
       <div className="picker__inner">
-        <div className="eyebrow">WINC · Direct cable crossing</div>
+        <img src={logo} alt="WINCI" className="picker__logo" style={{ width: 72, height: 72 }} />
+        <div className="eyebrow">WINCI · PC-to-PC data crossing</div>
         <h1>
           Move a whole PC<br />across one wire.
         </h1>
         <p className="picker__lead">
-          Plug the two computers together with a Thunderbolt or USB4 cable. WINC carries your
-          files and browser data straight across — no cloud, no accounts, no network in between.
+          Connect the two computers with a Thunderbolt / USB4 cable — or use any Wi-Fi or
+          Ethernet network by entering the new PC's IP address. WINCI carries your files and
+          browser data straight across — no cloud, no accounts, end-to-end encrypted.
         </p>
         <div className="picker__grid">
           <div className="role-card">

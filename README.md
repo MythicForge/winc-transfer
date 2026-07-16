@@ -1,20 +1,43 @@
-# WINC — Direct-Cable PC Data Crossing
+<p align="center">
+  <img src="src/assets/WINCI.svg" alt="WINCI logo" width="180" />
+</p>
 
-**Version 0.6.0**
+# WINCI — PC-to-PC Data Crossing
 
-Move files and browser data from an **old Windows PC** to a **new one** over a
-single Thunderbolt / USB4 cable — or any Wi-Fi / Ethernet network. No cloud, no
-accounts — the data crosses the wire directly, **end-to-end encrypted**.
+**Version 0.6.1**
+
+Move files and browser data from an **old Windows PC** to a **new one** — two
+ways, your choice:
+
+- **Direct cable** — a single Thunderbolt 3/4 or USB4 cable between the PCs.
+- **IP address** — any Wi-Fi or Ethernet network; just type the new PC's IP.
+
+Either way there's no cloud and no accounts — the data crosses directly,
+**end-to-end encrypted**.
 
 Built with **Tauri v2** (Rust core + a React/TypeScript UI).
+
+## Branding
+
+- Logo: `src/assets/WINCI.svg` (shown on the app's start screen and this page).
+- Icon pack: `src/assets/WINCI.ico` (10 sizes, 16–256 px). Copies extracted into
+  `src-tauri/icons/` (`icon.ico`, `32x32.png`, `128x128.png`, `128x128@2x.png`,
+  `icon.png`) are what `npm run tauri build` bundles into the installer and exe.
 
 ---
 
 ## How it works
 
-"Windows Direct Cable Networking" (Thunderbolt Networking / USB4NET) exposes the
-cable as an ordinary network adapter. Both PCs land on the same link-local
-segment (usually `169.254.x.x`). WINC rides that link:
+WINCI needs only an IP route between the two PCs, and gets one two ways:
+
+- **Cable**: "Windows Direct Cable Networking" (Thunderbolt Networking /
+  USB4NET) exposes the cable as an ordinary network adapter. Both PCs land on
+  the same link-local segment (usually `169.254.x.x`) and find each other
+  automatically.
+- **IP**: on any shared Wi-Fi / Ethernet network, the sender types the IP the
+  receiver displays — no cable, no discovery needed.
+
+The transfer protocol is identical on both paths:
 
 ```
   OLD PC (send)                         NEW PC (receive)
@@ -31,9 +54,10 @@ segment (usually `169.254.x.x`). WINC rides that link:
 - **Pair** — new PC shows a 6-digit code; old PC types it. The code drives a
   **SPAKE2** handshake over TCP before any data moves; a wrong code fails the
   handshake cleanly. The connection stays open from pairing through transfer.
-- **No cable?** The sender can skip discovery and **enter the new PC's IP** by
-  hand (any Wi-Fi / Ethernet network). The receiver shows its IP(s); the TCP port
-  is fixed at `50738`, so only the IP is needed.
+- **Connecting by IP** — a first-class path, not a fallback: the sender skips
+  discovery and **enters the new PC's IP** by hand (any Wi-Fi / Ethernet
+  network). The receiver shows its IP(s); the TCP port is fixed at `50738`, so
+  only the IP is needed.
 - **Encrypt** — everything after the handshake travels in length-prefixed
   **ChaCha20-Poly1305** AEAD frames with per-direction keys (HKDF-SHA256 from
   the PAKE shared secret). Always on — cable and network alike, no downgrade.
@@ -55,7 +79,7 @@ Source of truth for the wire protocol: `src-tauri/src/model.rs`, `net.rs`, and
   - Gecko family: Firefox, Zen, LibreWolf, Waterfox, Floorp
 
 > ☁ **OneDrive cloud-only files** ("available online-only" placeholders) can't
-> be read without hydrating them. WINC skips them cleanly mid-transfer instead
+> be read without hydrating them. WINCI skips them cleanly mid-transfer instead
 > of aborting the crossing.
 
 > ⚠ **Saved passwords are DPAPI-bound.** Chrome/Edge encrypt them against the
@@ -132,13 +156,18 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 2. Windows brings up a **Thunderbolt Networking** / **USB4 Net** adapter
    automatically. If not, enable it in the Thunderbolt Control Center / network
    adapter settings.
-3. Allow WINC through **Windows Firewall** (UDP `50737` for discovery, TCP
+3. Allow WINCI through **Windows Firewall** (UDP `50737` for discovery, TCP
    `50738` for transfer). Windows classes the cable link as an *Unidentified*
    (Public) network, where the standard first-run prompt (Private-only) doesn't
-   help — if the PCs never find each other, use the **"Allow WINC through the
+   help — if the PCs never find each other, use the **"Allow WINCI through the
    firewall"** button on the Connect step; it adds an all-profiles rule via one
    UAC prompt.
-4. Run WINC on both PCs — **Send** on the old one, **Receive** on the new one.
+4. Run WINCI on both PCs — **Send** on the old one, **Receive** on the new one.
+
+**No Thunderbolt cable?** Skip all of the above: put both PCs on the same
+Wi-Fi / Ethernet network, choose **Receive** on the new PC (it displays its
+IP), and on the old PC pick **"No cable — connect by IP"** and type that IP.
+Same pairing code, same encryption.
 
 ---
 
@@ -154,11 +183,20 @@ npm run dev      # http://localhost:5173  -> runs in mock mode
 - Incoming paths are sanitized (`net::safe_join`) so a manifest cannot write
   outside the destination folder.
 - Saved-password files remain DPAPI-bound to the Windows account (see warning
-  above) — WINC never decrypts them itself.
+  above) — WINCI never decrypts them itself.
 
 ## Version notes
 
-**0.6.0** (current)
+**0.6.1** (current)
+- Rebranded to **WINCI**: new logo (`src/assets/WINCI.svg`) and full icon pack
+  (`src/assets/WINCI.ico` → `src-tauri/icons/`) used by the built app and
+  installer; product name / window title / UI copy updated.
+- Copy now presents the two connection paths — **Thunderbolt/USB4 cable** and
+  **IP over Wi-Fi/Ethernet** — as equal options throughout the UI and README.
+- (Data folder remains `Documents\WINC Received` — unchanged for
+  compatibility with earlier crossings.)
+
+**0.6.0**
 - **Overwrite?** — browser imports skipped as "not fresh" now show an
   Overwrite? button in the report. Forcing it first backs the new PC's
   existing files up to `WINC Received\crossing-<ts>\Backup\<Browser>\`,

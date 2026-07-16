@@ -39,10 +39,11 @@ export default function ConnectStep() {
     <div>
       <div className="panel-head">
         <div className="eyebrow">Step 1 · Physical link</div>
-        <h2>Connect the cable</h2>
+        <h2>Connect the cable — or use your network</h2>
         <p>
           Join the two PCs with a Thunderbolt or USB4 cable. Windows brings up a direct network
-          bridge automatically — no router, no Wi-Fi. WINC watches for the link.
+          bridge automatically — no router, no Wi-Fi. WINCI watches for the link. No cable? Skip
+          this step and connect over any Wi-Fi / Ethernet network by IP address instead.
         </p>
       </div>
 
@@ -76,7 +77,7 @@ export default function ConnectStep() {
         {!up && (
           <ul style={{ color: "var(--ink-2)", marginTop: 16, lineHeight: 1.7, paddingLeft: 18 }}>
             <li>Use a cable rated for data (Thunderbolt 3/4 or USB4), not charge-only.</li>
-            <li>On the other PC, launch WINC too and choose the opposite role.</li>
+            <li>On the other PC, launch WINCI too and choose the opposite role.</li>
             <li>
               The cable shows up as an <b>Ethernet</b> adapter with a{" "}
               <span className="mono">169.254.x.x</span> address — that's normal.
@@ -132,7 +133,7 @@ export default function ConnectStep() {
             the standard firewall prompt only covers Private networks. */}
         <div style={{ marginTop: 16 }}>
           <p style={{ color: "var(--ink-2)", margin: "0 0 8px" }}>
-            If the PCs never find each other, Windows Firewall is usually blocking WINC on
+            If the PCs never find each other, Windows Firewall is usually blocking WINCI on
             “Public” networks — the cable link counts as one.
           </p>
           <button className="btn btn--ghost" onClick={allowFirewall} disabled={fw === "working"}>
@@ -140,12 +141,12 @@ export default function ConnectStep() {
               ? "Waiting for admin approval…"
               : fw === "done"
                 ? "✓ Firewall rule added"
-                : "Allow WINC through the firewall"}
+                : "Allow WINCI through the firewall"}
           </button>
           {fw === "error" && (
             <p className="field-warn" style={{ marginTop: 8 }}>
               Couldn’t add the rule — the admin prompt was declined or blocked. You can also allow
-              WINC manually in “Windows Security → Firewall → Allow an app”.
+              WINCI manually in “Windows Security → Firewall → Allow an app”.
             </p>
           )}
         </div>
@@ -156,7 +157,7 @@ export default function ConnectStep() {
           Cable is connected →
         </button>
         <button className="btn btn--ghost" onClick={() => dispatch({ t: "step", step: next })}>
-          No cable — {state.role === "receive" ? "receive over Wi-Fi / LAN" : "connect by IP instead"} →
+          No cable — {state.role === "receive" ? "receive over Wi-Fi / Ethernet" : "connect by IP over Wi-Fi / Ethernet"} →
         </button>
       </div>
     </div>

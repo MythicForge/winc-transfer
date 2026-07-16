@@ -38,7 +38,7 @@ export default function SelectStep() {
       <div className="panel-head">
         <div className="eyebrow">Step 3 · Payload</div>
         <h2>Choose what to carry over</h2>
-        <p>WINC found these on the old PC. Tick what should land on the new machine.</p>
+        <p>WINCI found these on the old PC. Tick what should land on the new machine.</p>
       </div>
 
       <div className="sources">
