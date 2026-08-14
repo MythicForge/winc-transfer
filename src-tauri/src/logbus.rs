@@ -212,7 +212,10 @@ pub fn init(app: &AppHandle) {
     }
     // Our `enabled()` does the real filtering, so let everything reach us.
     log::set_max_level(log::LevelFilter::Trace);
-    let _ = log::set_boxed_logger(Box::new(Bus));
+    // `set_logger` with a static, not `set_boxed_logger` — the boxed form is
+    // gated behind log's `std` feature, which nothing here enables.
+    static BUS: Bus = Bus;
+    let _ = log::set_logger(&BUS);
 
     // A panic in a spawned worker (beacon thread, blocking transfer) otherwise
     // dies silently — the transfer just stops with no explanation anywhere.
