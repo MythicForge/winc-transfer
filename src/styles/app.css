@@ -20,6 +20,11 @@
   align-items: baseline;
   gap: 10px;
 }
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .brand__mark {
   font-family: var(--display);
   font-weight: 700;

@@ -1,0 +1,196 @@
+/* ---------- activity log: shared by the in-app drawer and the popout ---------- */
+
+.logs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.logs__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--paper-2);
+  flex-wrap: wrap;
+}
+.logs__spacer {
+  flex: 1;
+}
+
+.logs__select,
+.logs__find {
+  font-family: var(--body);
+  font-size: var(--step--1);
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+.logs__find {
+  width: 200px;
+}
+.logs__find:focus-visible,
+.logs__select:focus-visible {
+  border-color: var(--cobalt);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--cobalt-soft);
+}
+
+.logs__count {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--slate);
+  white-space: nowrap;
+}
+.logs__errs {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.logs__btn {
+  font-size: var(--step--1);
+  padding: 6px 10px;
+}
+.logs__btn.is-on {
+  color: var(--cobalt);
+  background: var(--cobalt-soft);
+}
+
+.logs__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+  padding: 6px 0;
+  /* the tail is what matters, so keep the newest line legible at the bottom */
+  scrollbar-gutter: stable;
+}
+
+.logs__empty {
+  color: var(--slate);
+  font-size: var(--step--1);
+  padding: 18px 16px;
+}
+
+.logrow {
+  display: grid;
+  grid-template-columns: 88px 52px minmax(90px, 170px) 1fr;
+  gap: 10px;
+  padding: 2px 14px;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  line-height: 1.5;
+  color: var(--ink-2);
+  /* rows are uniform and numerous — let the engine skip offscreen ones */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 22px;
+}
+.logrow:hover {
+  background: var(--paper-2);
+}
+
+.logrow__t {
+  color: var(--slate);
+}
+.logrow__lvl {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  align-self: center;
+  color: var(--slate);
+}
+.logrow__src {
+  color: var(--slate);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.logrow__msg {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.logrow--error {
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
+}
+.logrow--error .logrow__lvl,
+.logrow--error .logrow__msg {
+  color: var(--bad);
+}
+.logrow--warn .logrow__lvl,
+.logrow--warn .logrow__msg {
+  color: var(--warn);
+}
+.logrow--debug .logrow__msg,
+.logrow--trace .logrow__msg {
+  color: var(--ink-2);
+  opacity: 0.8;
+}
+
+/* ---------- in-app drawer ---------- */
+
+.logdrawer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--hairline);
+  background: var(--panel);
+  box-shadow: var(--shadow-lift);
+}
+
+.logdrawer__grip {
+  height: 6px;
+  cursor: ns-resize;
+  background: transparent;
+  flex: none;
+}
+.logdrawer__grip:hover {
+  background: var(--cobalt-soft);
+}
+
+.logdrawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 14px 6px;
+  flex: none;
+}
+
+/* topbar toggle carries the unread-error count */
+.logbtn__dot {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  margin-left: 6px;
+  border-radius: 9px;
+  background: var(--bad);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* ---------- popout window ---------- */
+
+.logwin {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+.logwin__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  -webkit-user-select: none;
+  user-select: none;
+}

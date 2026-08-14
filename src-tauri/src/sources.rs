@@ -155,20 +155,27 @@ pub fn list_sources() -> Vec<SourceGroup> {
         ("Videos", dirs::video_dir()),
     ];
     for (label, path) in folders {
-        if let Some(p) = path.filter(|p| p.exists()) {
-            let (bytes, items) = measure_dir(&p);
-            groups.push(SourceGroup {
-                id: label.to_lowercase(),
-                label: label.to_string(),
-                hint: p.display().to_string(),
-                kind: "folder".into(),
-                path: Some(p.display().to_string()),
-                bytes,
-                items,
-                caveat: None,
-                selected: matches!(label, "Documents" | "Desktop" | "Pictures"),
-            });
-        }
+        let Some(p) = path.filter(|p| p.exists()) else {
+            log::debug!("source '{label}' not present on this PC — skipped");
+            continue;
+        };
+        let (bytes, items) = measure_dir(&p);
+        log::debug!(
+            "source '{label}': {items} file(s), {:.2} GB at {}",
+            bytes as f64 / 1e9,
+            p.display()
+        );
+        groups.push(SourceGroup {
+            id: label.to_lowercase(),
+            label: label.to_string(),
+            hint: p.display().to_string(),
+            kind: "folder".into(),
+            path: Some(p.display().to_string()),
+            bytes,
+            items,
+            caveat: None,
+            selected: matches!(label, "Documents" | "Desktop" | "Pictures"),
+        });
     }
 
     // Every browser from the catalog that actually exists on this PC. Each
@@ -196,8 +203,10 @@ pub fn list_sources() -> Vec<SourceGroup> {
     for (id, label, caveat, on) in browsers {
         let files = browser_files(&id);
         if files.is_empty() {
+            log::debug!("browser '{id}': no profile files found — not offered");
             continue;
         }
+        log::debug!("browser '{id}': {} file(s) found", files.len());
         let bytes: u64 = files
             .iter()
             .filter_map(|i| std::fs::metadata(&i.abs).ok().map(|m| m.len()))

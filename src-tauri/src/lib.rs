@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod import;
+mod logbus;
 mod model;
 mod net;
 mod sources;
@@ -13,13 +14,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Session::default())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Always on, release included: the log view and the on-disk log are
+            // the only way a fault on someone else's PC can be diagnosed.
+            logbus::init(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +34,14 @@ pub fn run() {
             commands::import_received,
             commands::import_browser_overwrite,
             commands::import_browser_retry,
+            logbus::get_logs,
+            logbus::clear_logs,
+            logbus::ui_log,
+            logbus::set_log_level,
+            logbus::get_log_level,
+            logbus::log_file_path,
+            logbus::open_log_dir,
+            logbus::open_log_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { backend, TRANSFER_PORT } from "../lib/api";
+import { errText, uiLog } from "../lib/log";
 
 type Mode = "auto" | "manual";
 
@@ -31,7 +32,10 @@ export default function PairStep() {
           setErr("No PC found on the cable. Switch to “Enter IP” if you’re on Wi-Fi or Ethernet.");
         }
       })
-      .catch(() => alive && setStatus("error"));
+      .catch((e) => {
+        uiLog.error("ui::pair", `discovery failed: ${errText(e)}`);
+        if (alive) setStatus("error");
+      });
     return () => {
       alive = false;
     };
@@ -62,6 +66,10 @@ export default function PairStep() {
       dispatch({ t: "sources", sources });
       dispatch({ t: "step", step: "select" });
     } catch (e) {
+      uiLog.error(
+        "ui::pair",
+        `pairing with ${manualPeer.ip}:${manualPeer.port} failed: ${errText(e)}`,
+      );
       setStatus("error");
       setErr(
         e instanceof Error && /wrong code|mismatch/i.test(e.message)

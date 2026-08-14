@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useStore } from "../store";
 import { backend } from "../lib/api";
+import { errText, uiLog } from "../lib/log";
 import type { AdapterInfo } from "../lib/types";
 
 export default function ConnectStep() {
@@ -14,7 +15,10 @@ export default function ConnectStep() {
     backend
       .allowFirewall()
       .then(() => setFw("done"))
-      .catch(() => setFw("error"));
+      .catch((e) => {
+        uiLog.error("ui::connect", `firewall rule not added: ${errText(e)}`);
+        setFw("error");
+      });
   }, []);
 
   useEffect(() => {
@@ -22,7 +26,10 @@ export default function ConnectStep() {
   }, [dispatch]);
 
   const refreshAdapters = useCallback(() => {
-    backend.listAdapters().then(setAdapters).catch(() => {});
+    backend
+      .listAdapters()
+      .then(setAdapters)
+      .catch((e) => uiLog.error("ui::connect", `adapter list failed: ${errText(e)}`));
   }, []);
 
   // refresh the adapter list on mount and every 2s while waiting

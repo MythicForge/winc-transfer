@@ -3,6 +3,7 @@
  * In a plain browser (dev / design preview on non-Windows) -> a mock so the
  * whole flow is drivable without two PCs. Detected via window.__TAURI_INTERNALS__.
  */
+import { errText, uiLog } from "./log";
 import type {
   AdapterInfo,
   ImportEntry,
@@ -60,11 +61,26 @@ export interface Backend {
 
 /* ---------------- Tauri backend ---------------- */
 
+/** Commands whose success is too frequent to log (the link poll runs every
+ *  1.5 s). Failures are always logged, however often they happen. */
+const QUIET = new Set(["get_link_status"]);
+
 function tauriBackend(): Backend {
   // dynamic import keeps mock-only browsers from choking on the module
   const invoke = async <T>(cmd: string, args?: Record<string, unknown>) => {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<T>(cmd, args);
+    const t = performance.now();
+    const ms = () => Math.round(performance.now() - t);
+    if (!QUIET.has(cmd)) uiLog.debug("ui::invoke", `→ ${cmd}`);
+    try {
+      const out = await invoke<T>(cmd, args);
+      if (!QUIET.has(cmd)) uiLog.debug("ui::invoke", `← ${cmd} ok in ${ms()}ms`);
+      return out;
+    } catch (e) {
+      // Every backend failure surfaces here, whatever the caller does with it.
+      uiLog.error("ui::invoke", `✕ ${cmd} failed after ${ms()}ms — ${errText(e)}`);
+      throw e;
+    }
   };
   const listen = async <T>(event: string, cb: (p: T) => void) => {
     const { listen } = await import("@tauri-apps/api/event");
@@ -168,10 +184,13 @@ function mockBackend(): Backend {
     },
     async startReceiver() {
       await sleep(400);
+      uiLog.info("mock", `receiver ready on 169.254.42.9:${TRANSFER_PORT} — code issued`);
       return { code: "418 620", peer: { name: "SURFACE-9", ip: "169.254.42.9", port: TRANSFER_PORT } };
     },
     async discoverPeer() {
+      uiLog.info("mock", "discovery: listening for a receiver beacon");
       await sleep(1800);
+      uiLog.info("mock", "discovery: found 'SURFACE-9' at 169.254.42.9");
       return { name: "SURFACE-9", ip: "169.254.42.9", port: TRANSFER_PORT };
     },
     async listLocalIps() {
@@ -180,7 +199,11 @@ function mockBackend(): Backend {
     },
     async pair(_peer, code) {
       await sleep(900);
-      if (code.replace(/\s/g, "").length !== 6) throw new Error("bad code");
+      if (code.replace(/\s/g, "").length !== 6) {
+        uiLog.error("mock", "pairing rejected — wrong code");
+        throw new Error("bad code");
+      }
+      uiLog.info("mock", "paired — encrypted channel open");
     },
     async listSources() {
       await sleep(600);
@@ -194,10 +217,16 @@ function mockBackend(): Backend {
       let bytesSent = 0;
       let filesSent = 0;
       const start = performance.now();
+      uiLog.info(
+        "mock",
+        `send starting — ${chosen.length} group(s), ${filesTotal} file(s), ${(bytesTotal / 1e9).toFixed(2)} GB`,
+      );
       for (const g of chosen) {
+        uiLog.debug("mock", `streaming '${g.label}' (${g.items} items)`);
         const steps = 22;
         for (let i = 0; i < steps; i++) {
           if (cancelled) {
+            uiLog.warn("mock", "transfer cancelled");
             onProgress({ state: "error", bytesSent, bytesTotal, filesSent, filesTotal, bytesPerSec: 0, currentFile: null, error: "Cancelled" });
             return;
           }
@@ -216,10 +245,16 @@ function mockBackend(): Backend {
           });
         }
       }
+      uiLog.info(
+        "mock",
+        `send finished in ${((performance.now() - start) / 1000).toFixed(1)}s`,
+      );
       onProgress({ state: "done", bytesSent: bytesTotal, bytesTotal, filesSent: filesTotal, filesTotal, bytesPerSec: 0, currentFile: null });
     },
     async receive(onPeer, onProgress) {
+      uiLog.info("mock", "waiting for a sender to connect…");
       await sleep(2000);
+      uiLog.info("mock", "sender 'OLD-DELL-7490' verified from 169.254.42.9");
       onPeer({ name: "OLD-DELL-7490", ip: "169.254.42.9", port: 52128 });
       await this.startSend({ name: "x", ip: "x", port: 0 }, ["docs", "desktop", "pictures", "chrome"], onProgress);
       return "C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000";
@@ -260,6 +295,7 @@ function mockBackend(): Backend {
       };
     },
     async cancel() {
+      uiLog.warn("mock", "cancel — stopping everything in flight");
       cancelled = true;
     },
     async allowFirewall() {

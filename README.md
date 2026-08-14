@@ -101,9 +101,14 @@ src/                     React UI (the "Signal Bench" design)
   store.tsx              app state machine (role -> step)
   components/Cable.tsx   the signature live-cable visualization
   components/...         rail, role picker, session controller
+  components/LogPanel.tsx  activity log view (drawer + popout share it)
+  components/LogDrawer.tsx in-app bottom drawer (Ctrl+L)
+  LogWindow.tsx          root for the detached window (index.html?view=log)
+  lib/log.ts             frontend end of the log bus
   steps/...              one file per wizard step
-  styles/                tokens.css - global.css - app.css
+  styles/                tokens.css - global.css - app.css - log.css
 src-tauri/src/
+  logbus.rs              log fan-out: ring buffer + winc://log event + log file
   model.rs               wire types + progress
   net.rs                 link detection, UDP discovery, TCP transfer
   crypto.rs              SPAKE2 handshake + ChaCha20-Poly1305 framed transport
@@ -185,9 +190,34 @@ Same pairing code, same encryption.
 - Saved-password files remain DPAPI-bound to the Windows account (see warning
   above) — WINCI never decrypts them itself.
 
+## Activity log
+
+Every step the app takes — adapter detection, beacon, pairing, each skipped
+file, every import decision — is logged. Open it with **Logs** in the title bar
+or **Ctrl+L** for an in-app drawer, or **Pop out ↗** for a separate window that
+can sit beside the main one during a transfer. Both views tail the same stream;
+the popout backfills from the in-memory ring buffer, so opening it mid-transfer
+still shows how things got there.
+
+- **Level** — Info by default. Debug adds per-command timing and per-adapter
+  detail; Trace names every file as it moves. Raising it here also raises it in
+  the Rust backend, so those records actually get produced.
+- **Log file** — the same lines are appended to
+  `%APPDATA%\com.winc.app\logs\winc.log` (rotates at 5 MB, one older file kept),
+  and the button reveals it in Explorer for "send me the log".
+- Logging is **on in release builds**, not just debug — a fault on someone
+  else's PC is the case that matters.
+
+---
+
 ## Version notes
 
-**0.6.1** (current)
+**0.7.0** (current)
+- **Activity log** — in-app drawer (Ctrl+L) and detachable window, backed by a
+  ring buffer + rotating log file in the Rust backend (`logbus.rs`). Backend and
+  UI both log; failures that the flow used to swallow now show up.
+
+**0.6.1**
 - Rebranded to **WINCI**: new logo (`src/assets/WINCI.svg`) and full icon pack
   (`src/assets/WINCI.ico` → `src-tauri/icons/`) used by the built app and
   installer; product name / window title / UI copy updated.

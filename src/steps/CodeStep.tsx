@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { backend } from "../lib/api";
+import { errText, uiLog } from "../lib/log";
 
 export default function CodeStep() {
   const { state } = useStore();
@@ -9,7 +10,10 @@ export default function CodeStep() {
   const [ips, setIps] = useState<string[]>([]);
 
   useEffect(() => {
-    backend.listLocalIps().then(setIps).catch(() => {});
+    backend
+      .listLocalIps()
+      .then(setIps)
+      .catch((e) => uiLog.error("ui::code", `could not list local IPs: ${errText(e)}`));
   }, []);
 
   return (

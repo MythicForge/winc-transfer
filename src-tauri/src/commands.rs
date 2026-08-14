@@ -46,15 +46,41 @@ fn emitter(app: &AppHandle) -> impl Fn(TransferProgress) + '_ {
     }
 }
 
+/// The UI polls link status every 1.5 s, so only *changes* are logged —
+/// otherwise the view is nothing but link lines.
+static LAST_LINK: Mutex<Option<String>> = Mutex::new(None);
+
 #[tauri::command]
 pub fn get_link_status() -> LinkStatus {
-    net::link_status()
+    let s = net::link_status();
+    let sig = format!(
+        "up={} adapter={:?} ip={:?} kind={:?}",
+        s.up, s.adapter, s.local_ip, s.kind
+    );
+    let mut last = LAST_LINK.lock().unwrap();
+    if last.as_deref() != Some(sig.as_str()) {
+        log::info!("link changed: {sig}");
+        *last = Some(sig);
+    }
+    s
 }
 
 /// All network adapters this PC sees, classified — for the connect-screen diagnostics.
 #[tauri::command]
 pub fn list_adapters() -> Vec<AdapterInfo> {
-    net::list_adapters()
+    let v = net::list_adapters();
+    log::info!("adapters: {} found", v.len());
+    for a in &v {
+        log::debug!(
+            "  adapter '{}' ip={} linkLocal={} cable={} kind={}",
+            a.name,
+            if a.ip.is_empty() { "(none yet)" } else { &a.ip },
+            a.link_local,
+            a.cable,
+            a.kind
+        );
+    }
+    v
 }
 
 #[tauri::command]
@@ -73,7 +99,15 @@ pub fn start_receiver(name: String, state: State<'_, Session>) -> Result<Receive
     *state.code.lock().unwrap() = Some(digits);
 
     // listener the sender will connect to
-    let (listener, port) = net::bind_listener().map_err(|e| e.to_string())?;
+    let (listener, port) = net::bind_listener().map_err(|e| {
+        log::error!("start_receiver: could not bind a listener: {e}");
+        e.to_string()
+    })?;
+    if port != TRANSFER_PORT {
+        log::warn!(
+            "port {TRANSFER_PORT} was taken — listening on {port} instead; manual IP pairing will need the port"
+        );
+    }
     *state.listener.lock().unwrap() = Some(listener);
 
     // broadcast beacon until stopped
@@ -82,25 +116,45 @@ pub fn start_receiver(name: String, state: State<'_, Session>) -> Result<Receive
     let bname = net::host_name(&name);
     std::thread::spawn(move || net::run_beacon(bname, port, stop));
 
+    let peer = Peer {
+        name: net::host_name(&name),
+        ip: net::advertised_ip(),
+        port,
+    };
+    log::info!(
+        "receiver ready as '{}' on {}:{} — pairing code issued",
+        peer.name,
+        peer.ip,
+        peer.port
+    );
     Ok(ReceiverInfo {
         code: display,
-        peer: Peer {
-            name: net::host_name(&name),
-            ip: net::advertised_ip(),
-            port,
-        },
+        peer,
     })
 }
 
 #[tauri::command]
 pub async fn discover_peer() -> Result<Option<Peer>, String> {
-    blocking(|| Ok(net::discover(Duration::from_secs(10)))).await
+    blocking(|| {
+        log::info!("discovery: listening for a receiver beacon (10s)");
+        let found = net::discover(Duration::from_secs(10));
+        match &found {
+            Some(p) => log::info!("discovery: found '{}' at {}:{}", p.name, p.ip, p.port),
+            None => log::warn!(
+                "discovery: no beacon in 10s — cable down, receiver not started, or inbound UDP {DISCOVERY_PORT} blocked by the firewall"
+            ),
+        }
+        Ok(found)
+    })
+    .await
 }
 
 /// All IPv4 addresses on this PC (direct-cable link first), for manual pairing.
 #[tauri::command]
 pub fn list_local_ips() -> Vec<String> {
-    net::local_ipv4s()
+    let ips = net::local_ipv4s();
+    log::info!("local IPv4s (cable first): {}", ips.join(", "));
+    ips
 }
 
 #[tauri::command]
@@ -108,7 +162,12 @@ pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String
     blocking(move || {
         let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
         let name = net::host_name("This PC");
-        let stream = net::connect_and_pair(&peer, &name, &digits).map_err(|e| e.to_string())?;
+        log::info!("pairing with {}:{} as '{}'", peer.ip, peer.port, name);
+        let stream = net::connect_and_pair(&peer, &name, &digits).map_err(|e| {
+            log::error!("pairing with {}:{} failed: {e}", peer.ip, peer.port);
+            e.to_string()
+        })?;
+        log::info!("paired with {}:{} — encrypted channel open", peer.ip, peer.port);
         let state = app.state::<Session>();
         *state.send_stream.lock().unwrap() = Some(stream);
         Ok(())
@@ -119,7 +178,21 @@ pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String
 #[tauri::command]
 pub async fn list_sources() -> Result<Vec<SourceGroup>, String> {
     // measures folder sizes on disk — can take seconds on a big Documents
-    blocking(|| Ok(sources::list_sources())).await
+    blocking(|| {
+        log::info!("scanning sources (measuring folder sizes)…");
+        let t = std::time::Instant::now();
+        let groups = sources::list_sources();
+        let bytes: u64 = groups.iter().map(|g| g.bytes).sum();
+        log::info!(
+            "sources: {} groups, {} files, {:.1} GB — scanned in {:.1}s",
+            groups.len(),
+            groups.iter().map(|g| g.items).sum::<u64>(),
+            bytes as f64 / 1e9,
+            t.elapsed().as_secs_f64()
+        );
+        Ok(groups)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -127,24 +200,31 @@ pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), St
     blocking(move || {
         let state = app.state::<Session>();
         state.cancel.store(false, Ordering::Relaxed);
-        let mut stream = state
-            .send_stream
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or("not paired — pair with the new PC first")?;
+        let mut stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
+            log::error!("start_send called with no paired connection");
+            "not paired — pair with the new PC first"
+        })?;
 
+        log::info!("send starting — groups: {}", group_ids.join(", "));
         let mut items = Vec::new();
         for id in &group_ids {
-            items.extend(sources::expand(id));
+            let expanded = sources::expand(id);
+            log::info!("  group '{id}' expands to {} file(s)", expanded.len());
+            items.extend(expanded);
         }
 
         let cancel = state.cancel.clone();
         let emit = emitter(&app);
-        net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
+        let t = std::time::Instant::now();
+        let out = net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
+            log::error!("send failed: {e}");
             let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
             e.to_string()
-        })
+        });
+        if out.is_ok() {
+            log::info!("send finished in {:.1}s", t.elapsed().as_secs_f64());
+        }
+        out
     })
     .await
 }
@@ -155,17 +235,20 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
     blocking(move || {
         let state = app.state::<Session>();
         state.cancel.store(false, Ordering::Relaxed);
-        let listener = state
-            .listener
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or("receiver not started")?;
+        let listener = state.listener.lock().unwrap().take().ok_or_else(|| {
+            log::error!("receive called before start_receiver");
+            "receiver not started"
+        })?;
         let code = state.code.lock().unwrap().clone().unwrap_or_default();
         let cancel = state.cancel.clone();
 
+        log::info!("waiting for a sender to connect…");
         let (mut stream, peer) =
-            net::accept_and_verify(&listener, &code, &cancel).map_err(|e| e.to_string())?;
+            net::accept_and_verify(&listener, &code, &cancel).map_err(|e| {
+                log::error!("accept/verify failed: {e}");
+                e.to_string()
+            })?;
+        log::info!("sender '{}' verified from {}", peer.name, peer.ip);
         let _ = app.emit("winc://paired", &peer);
 
         // stop advertising once someone connected
@@ -174,13 +257,20 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
         }
 
         let dest = incoming_dir();
-        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dest).map_err(|e| {
+            log::error!("could not create {}: {e}", dest.display());
+            e.to_string()
+        })?;
+        log::info!("receiving into {}", dest.display());
 
         let emit = emitter(&app);
+        let t = std::time::Instant::now();
         net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
+            log::error!("receive failed: {e}");
             let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
             e.to_string()
         })?;
+        log::info!("receive finished in {:.1}s", t.elapsed().as_secs_f64());
         Ok(dest.display().to_string())
     })
     .await
@@ -196,9 +286,21 @@ pub async fn import_received(dir: String) -> Result<crate::import::ImportReport,
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("WINC Received");
         if !p.starts_with(&base) || !p.is_dir() {
+            log::error!("refused import from outside WINC Received: {}", p.display());
             return Err("not a WINC received folder".into());
         }
-        Ok(crate::import::import_received(&p))
+        log::info!("import into place from {}", p.display());
+        let report = crate::import::import_received(&p);
+        for e in &report.entries {
+            log::info!(
+                "import: {} → {} ({} file(s)){}",
+                e.label,
+                e.action,
+                e.count,
+                e.detail.as_deref().map(|d| format!(" — {d}")).unwrap_or_default()
+            );
+        }
+        Ok(report)
     })
     .await
 }
@@ -216,9 +318,21 @@ pub async fn import_browser_overwrite(
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("WINC Received");
         if !p.starts_with(&base) || !p.is_dir() {
+            log::error!("refused import from outside WINC Received: {}", p.display());
             return Err("not a WINC received folder".into());
         }
-        crate::import::overwrite_browser(&p, &label)
+        log::warn!("overwriting {label}'s data on this PC (originals backed up first)");
+        let out = crate::import::overwrite_browser(&p, &label);
+        match &out {
+            Ok(e) => log::info!(
+                "overwrite {label}: {} ({} file(s)){}",
+                e.action,
+                e.count,
+                e.detail.as_deref().map(|d| format!(" — {d}")).unwrap_or_default()
+            ),
+            Err(e) => log::error!("overwrite {label} failed: {e}"),
+        }
+        out
     })
     .await
 }
@@ -237,9 +351,16 @@ pub async fn import_browser_retry(
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("WINC Received");
         if !p.starts_with(&base) || !p.is_dir() {
+            log::error!("refused import from outside WINC Received: {}", p.display());
             return Err("not a WINC received folder".into());
         }
-        crate::import::retry_browser(&p, &label)
+        log::info!("re-checking {label} after 'Open First'");
+        let out = crate::import::retry_browser(&p, &label);
+        match &out {
+            Ok(e) => log::info!("retry {label}: {} ({} file(s))", e.action, e.count),
+            Err(e) => log::error!("retry {label} failed: {e}"),
+        }
+        out
     })
     .await
 }
@@ -254,6 +375,7 @@ pub async fn import_browser_retry(
 pub async fn allow_firewall() -> Result<(), String> {
     #[cfg(windows)]
     return blocking(|| {
+        log::info!("requesting elevated firewall rule (UAC prompt)…");
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.display().to_string();
         // one elevated cmd: replace any old rule, then allow this program on
@@ -272,8 +394,10 @@ pub async fn allow_firewall() -> Result<(), String> {
             .status()
             .map_err(|e| e.to_string())?;
         if !status.success() {
+            log::error!("firewall rule not added — admin prompt declined or netsh failed");
             return Err("Firewall rule was not added (admin prompt declined?)".into());
         }
+        log::info!("firewall rule 'WINC Data Crossing' added for all profiles");
         Ok(())
     })
     .await;
@@ -285,6 +409,7 @@ pub async fn allow_firewall() -> Result<(), String> {
 /// transfer, and stops the discovery beacon. Called on "Start over".
 #[tauri::command]
 pub fn cancel(state: State<'_, Session>) {
+    log::warn!("cancel — stopping beacon, accept loop and any transfer in flight");
     state.cancel.store(true, Ordering::Relaxed);
     if let Some(stop) = state.beacon_stop.lock().unwrap().take() {
         stop.store(true, Ordering::Relaxed);

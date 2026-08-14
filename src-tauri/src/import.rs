@@ -69,7 +69,11 @@ fn write_log(dump: &Path, log: &[LogRow]) -> Option<String> {
         .unwrap_or(0);
     let path = dump.join(format!("import-log-{ts}.json"));
     let json = serde_json::to_vec_pretty(log).ok()?;
-    fs::write(&path, json).ok()?;
+    if let Err(e) = fs::write(&path, json) {
+        log::warn!("could not write the import snapshot to {}: {e}", path.display());
+        return None;
+    }
+    log::info!("import snapshot: {} row(s) → {}", log.len(), path.display());
     Some(path.display().to_string())
 }
 
@@ -182,6 +186,7 @@ fn import_folder(
             && match fs::copy(e.path(), &dest) {
                 Ok(_) => true,
                 Err(err) => {
+                    log::warn!("copy failed {} → {}: {err}", e.path().display(), dest.display());
                     if first_err.is_none() {
                         first_err = Some(err.to_string());
                     }
@@ -304,6 +309,11 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
                 let ok = fs::create_dir_all(bdir).is_ok() && fs::copy(&dest, &bpath).is_ok();
                 if !ok {
                     // refuse to overwrite anything we couldn't back up
+                    log::error!(
+                        "backup of {} → {} failed; stopping before any overwrite",
+                        dest.display(),
+                        bpath.display()
+                    );
                     log_row(log, &dest, &bpath, "failed");
                     return entry(
                         "error",
@@ -320,6 +330,7 @@ fn import_browser(src: &Path, label: &str, force: bool, log: &mut Vec<LogRow>) -
         }
         let overwrote = dest.exists();
         if let Err(e) = fs::copy(path, &dest) {
+            log::error!("{label}: copy to {} failed: {e}", dest.display());
             log_row(log, path, &dest, "failed");
             return entry(
                 "error",

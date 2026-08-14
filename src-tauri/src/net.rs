@@ -47,7 +47,10 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
     let mut out: Vec<AdapterInfo> = Vec::new();
     let adapters = match ipconfig::get_adapters() {
         Ok(v) => v,
-        Err(_) => return out,
+        Err(e) => {
+            log::error!("GetAdaptersAddresses failed — no adapters visible: {e}");
+            return out;
+        }
     };
     for a in adapters {
         if a.oper_status() != ipconfig::OperStatus::IfOperStatusUp {
@@ -177,9 +180,14 @@ pub fn run_beacon(name: String, tcp_port: u16, stop: Arc<AtomicBool>) {
 
     let sock = match UdpSocket::bind((bind_ip, 0)).or_else(|_| UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            log::error!("beacon: could not bind a UDP socket on {bind_ip}: {e} — the sender will never find this PC");
+            return;
+        }
     };
-    let _ = sock.set_broadcast(true);
+    if let Err(e) = sock.set_broadcast(true) {
+        log::warn!("beacon: SO_BROADCAST rejected: {e}");
+    }
 
     let bcast = if is_ll {
         Ipv4Addr::new(169, 254, 255, 255) // stays on the cable subnet
@@ -200,23 +208,57 @@ pub fn run_beacon(name: String, tcp_port: u16, stop: Arc<AtomicBool>) {
     if is_ll {
         targets.push(SocketAddrV4::new(Ipv4Addr::BROADCAST, DISCOVERY_PORT));
     }
+    log::info!(
+        "beacon: advertising '{}' at {}:{} from {} to {}{}",
+        beacon.name,
+        if beacon.ip.is_empty() { "(no cable IP)" } else { &beacon.ip },
+        tcp_port,
+        bind_ip,
+        bcast,
+        if is_ll { " (+255.255.255.255)" } else { " — no cable, using the LAN broadcast" }
+    );
+
+    // A send error every tick means the beacon is going nowhere; log the first
+    // one and then only on change, so a dead beacon is obvious without flooding.
+    let mut ticks: u64 = 0;
+    let mut last_err: Option<String> = None;
     while !stop.load(Ordering::Relaxed) {
         for t in &targets {
-            let _ = sock.send_to(&payload, t);
+            if let Err(e) = sock.send_to(&payload, t) {
+                let msg = format!("{t}: {e}");
+                if last_err.as_deref() != Some(msg.as_str()) {
+                    log::error!("beacon: send failed — {msg}");
+                    last_err = Some(msg);
+                }
+            }
+        }
+        ticks += 1;
+        if ticks % 25 == 0 {
+            log::debug!("beacon: still advertising ({}s)", ticks * 8 / 10);
         }
         std::thread::sleep(Duration::from_millis(800));
     }
+    log::info!("beacon: stopped after {ticks} tick(s)");
 }
 
 /// SENDER: listen for one receiver beacon. Returns the peer or None on timeout.
 pub fn discover(timeout: Duration) -> Option<Peer> {
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).ok()?;
+    let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!(
+                "discovery: could not bind UDP {DISCOVERY_PORT}: {e} — another copy of WINC running, or the port is in use"
+            );
+            return None;
+        }
+    };
     sock.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 1024];
     while Instant::now() < deadline {
         match sock.recv_from(&mut buf) {
             Ok((n, SocketAddr::V4(src))) => {
+                log::debug!("discovery: {n} byte(s) from {src}");
                 if let Ok(b) = serde_json::from_slice::<Beacon>(&buf[..n]) {
                     if b.magic == PROTO_MAGIC {
                         // prefer the cable IP the receiver advertised; fall back to
@@ -228,11 +270,15 @@ pub fn discover(timeout: Duration) -> Option<Peer> {
                             port: b.port,
                         });
                     }
+                    log::warn!("discovery: ignoring packet from {src} — wrong magic '{}'", b.magic);
                 }
             }
             Ok(_) => {}
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => break,
+            Err(e) => {
+                log::error!("discovery: socket read failed, giving up: {e}");
+                break;
+            }
         }
     }
     None
@@ -246,9 +292,17 @@ pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<En
     let addr: SocketAddr = format!("{}:{}", peer.ip, peer.port)
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad peer address"))?;
-    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(8))?;
+    log::info!("connecting to {addr} (8s timeout)");
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(8)).inspect_err(|e| {
+        log::error!(
+            "connect to {addr} failed: {e} — receiver not listening, wrong IP, or inbound TCP blocked on the other PC"
+        );
+    })?;
     stream.set_nodelay(true).ok();
-    let mut enc = crypto::pake_handshake(&stream, code, true)?;
+    log::debug!("TCP up to {addr}; running SPAKE2 handshake");
+    let mut enc = crypto::pake_handshake(&stream, code, true).inspect_err(|e| {
+        log::error!("handshake with {addr} failed: {e}");
+    })?;
 
     enc.write_json(&Hello {
         magic: PROTO_MAGIC.into(),
@@ -257,12 +311,15 @@ pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<En
     // On a wrong code the receiver can't decrypt our Hello and drops the
     // connection, so on Windows this read fails with a reset (os error 10054)
     // rather than a tidy refusal — surface it as "wrong code" either way.
-    let ack: HelloAck = enc
-        .read_json()
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"))?;
+    let ack: HelloAck = enc.read_json().map_err(|e| {
+        log::warn!("no usable ack from {addr} ({e}) — treating as a wrong pairing code");
+        io::Error::new(io::ErrorKind::PermissionDenied, "wrong code")
+    })?;
     if !ack.ok {
+        log::warn!("receiver at {addr} rejected the pairing code");
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "wrong code"));
     }
+    log::info!("handshake with {addr} complete");
     Ok(enc)
 }
 
@@ -283,6 +340,10 @@ pub fn send_files<F: Fn(TransferProgress)>(
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     let total_files = entries.len() as u64;
 
+    log::info!(
+        "manifest: {total_files} file(s), {:.2} GB",
+        total_bytes as f64 / 1e9
+    );
     stream.write_json(&Manifest {
         files: entries.clone(),
         total_bytes,
@@ -303,9 +364,11 @@ pub fn send_files<F: Fn(TransferProgress)>(
     // does not rely on the manifest sizes.
     for (idx, item) in items.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
+            log::warn!("send cancelled after {idx}/{total_files} file(s)");
             emit(TransferProgress::error("Cancelled"));
             return Ok(());
         }
+        log::trace!("sending {}", item.rel);
         let mut ok = true;
         match std::fs::File::open(&item.abs) {
             Ok(mut f) => loop {
@@ -313,7 +376,8 @@ pub fn send_files<F: Fn(TransferProgress)>(
                     Ok(0) => break,
                     Ok(n) => n,
                     // cloud placeholder / IO fault mid-read: stop this file, keep the stream sane
-                    Err(_) => {
+                    Err(e) => {
+                        log::warn!("read failed mid-file, skipping '{}': {e}", item.rel);
                         ok = false;
                         break;
                     }
@@ -333,7 +397,11 @@ pub fn send_files<F: Fn(TransferProgress)>(
                     last_emit = Instant::now();
                 }
             },
-            Err(_) => ok = false, // locked/removed/placeholder: skip cleanly
+            // locked/removed/placeholder: skip cleanly
+            Err(e) => {
+                log::warn!("cannot open, skipping '{}': {e}", item.rel);
+                ok = false;
+            }
         }
         // empty frame = end of this file
         stream.write_frame(&[])?;
@@ -342,9 +410,17 @@ pub fn send_files<F: Fn(TransferProgress)>(
         }
     }
     stream.flush()?;
+    log::info!(
+        "sent {:.2} GB in {:.1}s ({:.0} MB/s), {} skipped",
+        sent as f64 / 1e9,
+        start.elapsed().as_secs_f64(),
+        sent as f64 / start.elapsed().as_secs_f64().max(0.001) / 1e6,
+        failed.len()
+    );
     if failed.is_empty() {
         emit(TransferProgress::done(total_bytes, total_files));
     } else {
+        log::error!("{} file(s) could not be read: {}", failed.len(), failed.join(", "));
         emit(TransferProgress::error(&format!(
             "{} file(s) could not be read (cloud/offline or locked): {}",
             failed.len(),
@@ -374,12 +450,18 @@ pub fn accept_and_verify(
                 std::thread::sleep(Duration::from_millis(120));
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                log::error!("accept failed: {e}");
+                return Err(e);
+            }
         }
     };
+    log::info!("inbound connection from {addr}");
     stream.set_nonblocking(false)?; // blocking again for the transfer
     stream.set_nodelay(true).ok();
-    let mut enc = crypto::pake_handshake(&stream, code, false)?;
+    let mut enc = crypto::pake_handshake(&stream, code, false).inspect_err(|e| {
+        log::error!("handshake with {addr} failed: {e}");
+    })?;
 
     // A decrypt failure here means the sender used a different code — one
     // wrong online guess kills the connection, which is the rate limit. The
@@ -387,6 +469,7 @@ pub fn accept_and_verify(
     let hello: Hello = match enc.read_json() {
         Ok(h) => h,
         Err(e) => {
+            log::warn!("could not decrypt hello from {addr} ({e}) — wrong pairing code; dropping the connection");
             if e.kind() == io::ErrorKind::PermissionDenied {
                 std::thread::sleep(Duration::from_millis(400));
             }
@@ -394,6 +477,7 @@ pub fn accept_and_verify(
         }
     };
     if hello.magic != PROTO_MAGIC {
+        log::error!("{addr} is not a WINC peer (magic '{}')", hello.magic);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "not a WINC peer"));
     }
     enc.write_json(&HelloAck { ok: true })?;
@@ -418,7 +502,14 @@ pub fn receive_files<F: Fn(TransferProgress)>(
     cancel: &Arc<AtomicBool>,
     emit: F,
 ) -> io::Result<()> {
-    let manifest: Manifest = stream.read_json()?;
+    let manifest: Manifest = stream.read_json().inspect_err(|e| {
+        log::error!("could not read the manifest: {e}");
+    })?;
+    log::info!(
+        "manifest received: {} file(s), {:.2} GB",
+        manifest.total_files,
+        manifest.total_bytes as f64 / 1e9
+    );
 
     let mut got: u64 = 0;
     let start = Instant::now();
@@ -426,14 +517,20 @@ pub fn receive_files<F: Fn(TransferProgress)>(
 
     for (idx, entry) in manifest.files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
+            log::warn!("receive cancelled after {idx}/{} file(s)", manifest.total_files);
             emit(TransferProgress::error("Cancelled"));
             return Ok(());
         }
         let out_path = safe_join(dest, &entry.rel);
+        log::trace!("receiving {}", entry.rel);
         if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).inspect_err(|e| {
+                log::error!("could not create {}: {e}", parent.display());
+            })?;
         }
-        let mut out = std::fs::File::create(&out_path)?;
+        let mut out = std::fs::File::create(&out_path).inspect_err(|e| {
+            log::error!("could not create {}: {e}", out_path.display());
+        })?;
         // Read one decrypted frame per chunk until the empty end-of-file frame.
         loop {
             let chunk = stream.read_frame()?;
@@ -456,6 +553,13 @@ pub fn receive_files<F: Fn(TransferProgress)>(
             }
         }
     }
+    log::info!(
+        "wrote {:.2} GB in {:.1}s ({:.0} MB/s) to {}",
+        got as f64 / 1e9,
+        start.elapsed().as_secs_f64(),
+        got as f64 / start.elapsed().as_secs_f64().max(0.001) / 1e6,
+        dest.display()
+    );
     emit(TransferProgress::done(manifest.total_bytes, manifest.total_files));
     Ok(())
 }
@@ -475,9 +579,12 @@ pub(crate) fn safe_join(dest: &Path, rel: &str) -> PathBuf {
 /// Bind the TCP listener. Prefer the fixed TRANSFER_PORT so a person entering an
 /// IP by hand never needs a port; fall back to an ephemeral port if it's taken.
 pub fn bind_listener() -> io::Result<(TcpListener, u16)> {
-    let l = TcpListener::bind((Ipv4Addr::UNSPECIFIED, TRANSFER_PORT))
-        .or_else(|_| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
+    let l = TcpListener::bind((Ipv4Addr::UNSPECIFIED, TRANSFER_PORT)).or_else(|e| {
+        log::warn!("TCP {TRANSFER_PORT} unavailable ({e}) — falling back to an ephemeral port");
+        TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+    })?;
     let port = l.local_addr()?.port();
+    log::info!("listening on 0.0.0.0:{port}");
     Ok((l, port))
 }
 
