@@ -318,8 +318,12 @@ pub fn open_log_dir() -> Result<(), String> {
 
 /// Open (or focus) the detachable log window. Built here rather than in JS so
 /// the main window needs no window-creation capability.
+///
+/// Must stay `async`: a sync command runs on the main thread, and building a
+/// webview window there deadlocks on Windows — the window came up blank and
+/// wouldn't close.
 #[tauri::command]
-pub fn open_log_window(app: AppHandle) -> Result<(), String> {
+pub async fn open_log_window(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("logs") {
         let _ = w.unminimize();
         let _ = w.show();

@@ -1,6 +1,8 @@
 use crate::api;
+use crate::format::bytes;
 use crate::log;
 use crate::store::use_store;
+use crate::types::DropSettings;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -15,6 +17,45 @@ pub fn CodeStep() -> impl IntoView {
             Err(e) => log::error("ui::code", &format!("could not list local IPs: {e}")),
         }
     });
+
+    // Where incoming data lands — changeable until the sender connects (this
+    // step unmounts then), remembered by the backend for next time.
+    let drop = RwSignal::new(None::<DropSettings>);
+    let free = RwSignal::new(None::<u64>);
+    let show = move |d: DropSettings| {
+        let root = d.receive_root.clone();
+        drop.set(Some(d));
+        spawn_local(async move { free.set(api::free_space(&root).await.ok().flatten()) });
+    };
+    spawn_local(async move {
+        match api::get_drop_settings().await {
+            Ok(d) => show(d),
+            Err(e) => log::error("ui::code", &format!("could not read the drop folder: {e}")),
+        }
+    });
+    let set_root = move |root: Option<String>| {
+        spawn_local(async move {
+            match api::set_receive_root(root).await {
+                Ok(d) => show(d),
+                Err(e) => log::error("ui::code", &format!("could not change the drop folder: {e}")),
+            }
+        })
+    };
+    let change = move |_| {
+        spawn_local(async move {
+            match api::pick_folder().await {
+                Ok(Some(dir)) => set_root(Some(dir)),
+                Ok(None) => {}
+                Err(e) => log::error("ui::code", &format!("folder picker failed: {e}")),
+            }
+        })
+    };
+    let landing = move || {
+        drop.with(|d| match d {
+            Some(d) => format!("{}\\WINC Received", d.receive_root.trim_end_matches('\\')),
+            None => "…".into(),
+        })
+    };
 
     let code = move || {
         let c = store.code.get();
@@ -72,6 +113,28 @@ pub fn CodeStep() -> impl IntoView {
                         }
                     }}
                 </div>
+            </div>
+
+            <div class="card ipcard">
+                <div class="diag-head">
+                    <div class="eyebrow">"Where incoming data lands"</div>
+                    <div class="pick-actions" style="margin-top: 0">
+                        <Show when=move || drop.with(|d| d.as_ref().is_some_and(|d| !d.receive_is_default))>
+                            <button class="btn btn--ghost" on:click=move |_| set_root(None)>
+                                "Use Documents"
+                            </button>
+                        </Show>
+                        <button class="btn btn--ghost" on:click=change>"Change folder…"</button>
+                    </div>
+                </div>
+                <p style="color: var(--ink-2); margin: 0">
+                    "Received files go to " <span class="mono">{landing}</span>
+                    {move || free.get().map(|f| format!(" — {} free.", bytes(f as f64)))}
+                </p>
+                <p style="color: var(--slate); margin: 8px 0 0; font-size: var(--step--1)">
+                    "If this drive is short on space, pick a bigger one before the old PC connects. "
+                    "WINCI remembers the choice."
+                </p>
             </div>
 
             <div class="waiting" style="margin-top: 22px">

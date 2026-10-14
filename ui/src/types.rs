@@ -128,6 +128,17 @@ pub struct ImportReport {
     pub entries: Vec<ImportEntry>,
 }
 
+/// Receiver drop locations (remembered between runs by the backend).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropSettings {
+    /// Root crossings land under (<root>\WINC Received\...).
+    pub receive_root: String,
+    pub receive_is_default: bool,
+    /// Last chosen import folder; None = the user folders.
+    pub import_dir: Option<String>,
+}
+
 /// One line of the activity log, from Rust (logbus.rs) or the UI.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct LogEntry {

@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.9.2**
+**Version 0.10.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -216,7 +216,21 @@ still shows how things got there.
 
 ## Version notes
 
-**0.9.2** (current)
+**0.10.0** (current)
+- **Choose where data lands (receiver)** — the code screen shows where incoming
+  files go (default `Documents\WINC Received`) with the drive's free space, and
+  **Change folder…** points it at any folder/drive. Remembered between runs
+  (`settings.json` in the app config dir). A transfer that won't fit is stopped
+  up front with a clear message instead of failing part-way.
+- **Choose where Import puts it** — the Done screen imports into *Your user
+  folders* (as before) or *A folder you choose* (`<folder>\Documents`,
+  `<folder>\Desktop`, … and custom picks straight in). The last folder is
+  pre-selected next time. Browser data still goes to the browsers.
+- **Pop-out log fix** — the log window opened blank and couldn't be closed on
+  Windows: it was created from a synchronous command, which deadlocks there.
+- Log level dropdown is readable in dark mode.
+
+**0.9.2**
 - **Blank-window fix** — the packaged app showed an empty window: the log bus
   started a background task before the UI mounted, which panics in Leptos.
   It now starts after mount. Demo mode never hit this path.

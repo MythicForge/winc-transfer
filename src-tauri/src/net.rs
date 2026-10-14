@@ -562,6 +562,19 @@ pub fn receive_files<F: Fn(TransferProgress)>(
     }
     // data flows continuously from here, as before — no read deadline
     stream.set_read_timeout(None)?;
+    // Fail now, not 90% of the way in, if the drop folder's drive can't hold it.
+    if let Some(free) = crate::settings::free_space(dest) {
+        if free < head.total_bytes {
+            let msg = format!(
+                "not enough space on the drive holding {} — need {:.1} GB, {:.1} GB free. Pick a bigger drive for incoming data and pair again",
+                dest.display(),
+                head.total_bytes as f64 / 1e9,
+                free as f64 / 1e9
+            );
+            log::error!("{msg}");
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
+        }
+    }
     log::info!(
         "manifest received: {} file(s), {:.2} GB",
         head.total_files,

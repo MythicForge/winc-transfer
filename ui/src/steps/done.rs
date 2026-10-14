@@ -30,12 +30,42 @@ pub fn DoneStep() -> impl IntoView {
     let err = RwSignal::new(None::<String>);
     let pending = RwSignal::new(None::<String>);
 
+    // Import destination: the user folders, or a folder the user picks (e.g. a
+    // bigger drive). The last picked folder comes back pre-selected.
+    let use_folder = RwSignal::new(false);
+    let folder = RwSignal::new(None::<String>);
+    let folder_free = RwSignal::new(None::<u64>);
+    let set_folder = move |dir: String| {
+        folder.set(Some(dir.clone()));
+        spawn_local(async move { folder_free.set(api::free_space(&dir).await.ok().flatten()) });
+    };
+    if !sending {
+        spawn_local(async move {
+            if let Ok(Some(dir)) = api::get_drop_settings().await.map(|d| d.import_dir) {
+                use_folder.set(true);
+                set_folder(dir);
+            }
+        });
+    }
+    let choose = move |_| {
+        spawn_local(async move {
+            if let Ok(Some(dir)) = api::pick_folder().await {
+                use_folder.set(true);
+                set_folder(dir);
+            }
+        })
+    };
+
     let run_import = move |_| {
         let Some(dir) = store.received_dir.get_untracked() else { return };
+        let target = if use_folder.get_untracked() { folder.get_untracked() } else { None };
+        if use_folder.get_untracked() && target.is_none() {
+            return;
+        }
         busy.set(true);
         err.set(None);
         spawn_local(async move {
-            match api::import_received(&dir).await {
+            match api::import_received(&dir, target.as_deref()).await {
                 Ok(r) => report.set(Some(r)),
                 Err(e) => err.set(Some(e)),
             }
@@ -137,14 +167,52 @@ pub fn DoneStep() -> impl IntoView {
                             <span class="mono">
                                 {move || store.received_dir.get().unwrap_or_else(|| "Documents\\WINC Received".into())}
                             </span>
-                            ". Import moves them into your real folders — nothing on this PC is overwritten; "
-                            "incoming duplicates are kept as “name (from old PC)”. Browser data imports "
-                            "only into browsers with no existing data; ones that already have data show "
-                            "an " <b>"Overwrite?"</b> " option, and ones not yet opened show " <b>"Open First"</b> "."
+                            ". Import moves them into your real folders — or under a folder you choose — and "
+                            "nothing there is overwritten; incoming duplicates are kept as “name (from old PC)”. "
+                            "Browser data imports only into browsers with no existing data; ones that already "
+                            "have data show an " <b>"Overwrite?"</b> " option, and ones not yet opened show "
+                            <b>"Open First"</b> "."
                         </p>
+                        <div class="segmented" role="tablist">
+                            <button
+                                role="tab"
+                                aria-selected=move || (!use_folder.get()).to_string()
+                                class=move || if use_folder.get() { "segmented__btn" } else { "segmented__btn is-on" }
+                                on:click=move |_| use_folder.set(false)
+                            >
+                                "Your user folders"
+                            </button>
+                            <button
+                                role="tab"
+                                aria-selected=move || use_folder.get().to_string()
+                                class=move || if use_folder.get() { "segmented__btn is-on" } else { "segmented__btn" }
+                                on:click=move |_| use_folder.set(true)
+                            >
+                                "A folder you choose"
+                            </button>
+                        </div>
+                        <Show when=move || use_folder.get()>
+                            <div class="pick-actions" style="margin: 0 0 14px">
+                                <span class="mono" style="color: var(--ink-2)">
+                                    {move || folder.get().unwrap_or_else(|| "No folder chosen yet".into())}
+                                </span>
+                                {move || folder_free.get().map(|f| view! {
+                                    <span class="pick-busy">{format!("{} free", bytes(f as f64))}</span>
+                                })}
+                                <button class="btn btn--ghost" on:click=choose>"Choose folder…"</button>
+                            </div>
+                            <p style="color: var(--slate); margin: 0 0 14px; font-size: var(--step--1)">
+                                "Documents, Desktop, Pictures… land as subfolders of it; custom picks go straight "
+                                "in. Remembered for next time."
+                            </p>
+                        </Show>
                         <button
                             class="btn btn--primary"
-                            disabled=move || busy.get() || store.received_dir.with(|d| d.is_none())
+                            disabled=move || {
+                                busy.get()
+                                    || store.received_dir.with(|d| d.is_none())
+                                    || (use_folder.get() && folder.with(|f| f.is_none()))
+                            }
                             on:click=run_import
                         >
                             {move || if busy.get() { "Importing…" } else { "Import into place" }}

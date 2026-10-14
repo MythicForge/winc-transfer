@@ -12,6 +12,22 @@ thread_local! {
     static PICKED: RefCell<Vec<SourceGroup>> = const { RefCell::new(Vec::new()) };
     /// first link poll — the "cable" comes up 2.6 s later
     static LINK_T0: Cell<Option<f64>> = const { Cell::new(None) };
+    static RECEIVE_ROOT: RefCell<Option<String>> = const { RefCell::new(None) };
+    static IMPORT_DIR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn drop_settings() -> DropSettings {
+    let root = RECEIVE_ROOT.with(|r| r.borrow().clone());
+    DropSettings {
+        receive_is_default: root.is_none(),
+        receive_root: root.unwrap_or_else(|| "C:\\Users\\you\\Documents".into()),
+        import_dir: IMPORT_DIR.with(|d| d.borrow().clone()),
+    }
+}
+
+pub fn set_receive_root(root: Option<String>) -> DropSettings {
+    RECEIVE_ROOT.with(|r| *r.borrow_mut() = root);
+    drop_settings()
 }
 
 const DPAPI: &str = "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.";
@@ -221,7 +237,7 @@ pub async fn receive(on_peer: &dyn Fn(Peer), on_progress: &dyn Fn(TransferProgre
     on_peer(Peer { name: "OLD-DELL-7490".into(), ip: "169.254.42.9".into(), port: 52128 });
     let ids: Vec<String> = ["docs", "desktop", "pictures", "chrome"].map(String::from).to_vec();
     start_send(&ids, on_progress).await;
-    "C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000".into()
+    format!("{}\\WINC Received\\crossing-1721000000", drop_settings().receive_root)
 }
 
 fn entry(label: &str, action: &str, count: u64, detail: Option<&str>, browser: Option<&str>) -> ImportEntry {
@@ -234,14 +250,22 @@ fn entry(label: &str, action: &str, count: u64, detail: Option<&str>, browser: O
     }
 }
 
-pub async fn import_received() -> ImportReport {
+pub async fn import_received(target: Option<&str>) -> ImportReport {
     sleep(1500).await;
+    IMPORT_DIR.with(|d| *d.borrow_mut() = target.map(String::from));
+    let to = |label: &str| target.map(|t| format!("→ {t}\\{label}"));
     ImportReport {
         entries: vec![
-            entry("Documents", "imported", 12840, Some("3 kept both"), None),
-            entry("Desktop", "imported", 214, None, None),
-            entry("Pictures", "imported", 9021, None, None),
-            entry("Tax Stuff", "imported", 96, Some("→ Documents\\Tax Stuff"), None),
+            entry("Documents", "imported", 12840, to("Documents").as_deref().or(Some("3 kept both")), None),
+            entry("Desktop", "imported", 214, to("Desktop").as_deref(), None),
+            entry("Pictures", "imported", 9021, to("Pictures").as_deref(), None),
+            entry(
+                "Tax Stuff",
+                "imported",
+                96,
+                Some(&format!("→ {}\\Tax Stuff", target.unwrap_or("Documents"))),
+                None,
+            ),
             entry("Chrome (browser)", "skipped-not-fresh", 0, Some("Chrome already has data on this PC — use Overwrite to replace it with the old PC's (originals are backed up first)."), Some("Chrome")),
             entry("Edge (browser)", "skipped-not-installed", 0, Some("Edge isn't installed on this PC (or has never been opened)."), Some("Edge")),
         ],

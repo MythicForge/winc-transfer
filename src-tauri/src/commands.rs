@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::{crypto, net, sources};
+use crate::{crypto, net, settings, sources};
 use rand::Rng;
 use serde::Serialize;
 use std::net::TcpListener;
@@ -299,7 +299,8 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
             stop.store(true, Ordering::Relaxed);
         }
 
-        let dest = incoming_dir();
+        // read now, not at start: the user may change the drop folder while waiting
+        let dest = incoming_dir(&settings::receive_root(&settings::load(&app)));
         std::fs::create_dir_all(&dest).map_err(|e| {
             log::error!("could not create {}: {e}", dest.display());
             e.to_string()
@@ -319,21 +320,97 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
     .await
 }
 
-/// Move a finished crossing out of Documents\WINC Received into the real user
-/// folders / browser profiles. Only accepts paths under WINC Received.
+/// Only crossing folders (…\WINC Received\crossing-<ts>) may be imported
+/// from — wherever the receiver's drop folder was pointed.
+fn crossing_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::PathBuf::from(dir);
+    let is_crossing = p.is_dir()
+        && p.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("crossing-"))
+        && p.parent()
+            .and_then(|q| q.file_name())
+            .is_some_and(|n| n == "WINC Received");
+    if !is_crossing {
+        log::error!("refused import from a non-crossing folder: {}", p.display());
+        return Err("not a WINC received folder".into());
+    }
+    Ok(p)
+}
+
+/// The receiver's drop locations, for the UI.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropSettings {
+    /// Effective root crossings land under (<root>\WINC Received\...).
+    pub receive_root: String,
+    pub receive_is_default: bool,
+    /// Last chosen import folder; None = the user folders.
+    pub import_dir: Option<String>,
+}
+
+fn drop_settings(app: &AppHandle) -> DropSettings {
+    let s = settings::load(app);
+    let root = settings::receive_root(&s);
+    DropSettings {
+        receive_is_default: root == settings::default_receive_root(),
+        receive_root: root.display().to_string(),
+        import_dir: s.import_dir.filter(|d| std::path::Path::new(d).is_dir()),
+    }
+}
+
 #[tauri::command]
-pub async fn import_received(dir: String) -> Result<crate::import::ImportReport, String> {
-    blocking(move || {
-        let p = std::path::PathBuf::from(&dir);
-        let base = dirs::document_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("WINC Received");
-        if !p.starts_with(&base) || !p.is_dir() {
-            log::error!("refused import from outside WINC Received: {}", p.display());
-            return Err("not a WINC received folder".into());
+pub fn get_drop_settings(app: AppHandle) -> DropSettings {
+    drop_settings(&app)
+}
+
+/// Point incoming crossings at another folder/drive (None = back to Documents).
+/// Remembered for next time.
+#[tauri::command]
+pub fn set_receive_root(root: Option<String>, app: AppHandle) -> Result<DropSettings, String> {
+    if let Some(r) = &root {
+        if !std::path::Path::new(r).is_dir() {
+            return Err(format!("{r} is not a folder"));
         }
-        log::info!("import into place from {}", p.display());
-        let report = crate::import::import_received(&p);
+    }
+    let mut s = settings::load(&app);
+    s.receive_root = root;
+    settings::save(&app, &s);
+    let out = drop_settings(&app);
+    log::info!("receive folder set to {}", out.receive_root);
+    Ok(out)
+}
+
+/// Free bytes on the drive holding `path`.
+#[tauri::command]
+pub fn free_space(path: String) -> Option<u64> {
+    settings::free_space(std::path::Path::new(&path))
+}
+
+/// Move a finished crossing out of its WINC Received folder into the real user
+/// folders (or under `target`, if the user picked one) and browser profiles.
+#[tauri::command]
+pub async fn import_received(
+    dir: String,
+    target: Option<String>,
+    app: AppHandle,
+) -> Result<crate::import::ImportReport, String> {
+    blocking(move || {
+        let p = crossing_dir(&dir)?;
+        let target = target.map(std::path::PathBuf::from);
+        if let Some(t) = &target {
+            if !t.is_dir() {
+                return Err(format!("{} is not a folder", t.display()));
+            }
+        }
+        // remember the choice (or the switch back to user folders) for next time
+        let mut s = settings::load(&app);
+        s.import_dir = target.as_ref().map(|t| t.display().to_string());
+        settings::save(&app, &s);
+        match &target {
+            Some(t) => log::info!("import from {} into {}", p.display(), t.display()),
+            None => log::info!("import into place from {}", p.display()),
+        }
+        let report = crate::import::import_received(&p, target.as_deref());
         for e in &report.entries {
             log::info!(
                 "import: {} → {} ({} file(s)){}",
@@ -356,14 +433,7 @@ pub async fn import_browser_overwrite(
     label: String,
 ) -> Result<crate::import::ImportEntry, String> {
     blocking(move || {
-        let p = std::path::PathBuf::from(&dir);
-        let base = dirs::document_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("WINC Received");
-        if !p.starts_with(&base) || !p.is_dir() {
-            log::error!("refused import from outside WINC Received: {}", p.display());
-            return Err("not a WINC received folder".into());
-        }
+        let p = crossing_dir(&dir)?;
         log::warn!("overwriting {label}'s data on this PC (originals backed up first)");
         let out = crate::import::overwrite_browser(&p, &label);
         match &out {
@@ -389,14 +459,7 @@ pub async fn import_browser_retry(
     label: String,
 ) -> Result<crate::import::ImportEntry, String> {
     blocking(move || {
-        let p = std::path::PathBuf::from(&dir);
-        let base = dirs::document_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("WINC Received");
-        if !p.starts_with(&base) || !p.is_dir() {
-            log::error!("refused import from outside WINC Received: {}", p.display());
-            return Err("not a WINC received folder".into());
-        }
+        let p = crossing_dir(&dir)?;
         log::info!("re-checking {label} after 'Open First'");
         let out = crate::import::retry_browser(&p, &label);
         match &out {
@@ -460,8 +523,7 @@ pub fn cancel(state: State<'_, Session>) {
     *state.send_stream.lock().unwrap() = None;
 }
 
-fn incoming_dir() -> std::path::PathBuf {
-    let base = dirs::document_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+fn incoming_dir(base: &std::path::Path) -> std::path::PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

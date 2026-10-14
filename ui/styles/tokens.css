@@ -1,6 +1,8 @@
 /* WINC — "Signal Bench" design tokens
    Two accents carry meaning: cobalt = data/signal, copper = the physical cable. */
 :root {
+  /* native controls (the log level <select>) follow the theme too */
+  color-scheme: light dark;
   /* palette */
   --paper: #f5f7fa;
   --paper-2: #eef1f6;

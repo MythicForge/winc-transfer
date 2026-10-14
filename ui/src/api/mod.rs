@@ -169,12 +169,50 @@ pub async fn receive(
     invoke("receive", ()).await
 }
 
-/// RECEIVE side: move a finished crossing into the real folders / browsers.
-pub async fn import_received(dir: &str) -> Result<ImportReport, String> {
+/// RECEIVE side: move a finished crossing into the real folders / browsers —
+/// or, with `target`, under a folder the user picked.
+pub async fn import_received(dir: &str, target: Option<&str>) -> Result<ImportReport, String> {
     if mock() {
-        return Ok(mock::import_received().await);
+        return Ok(mock::import_received(target).await);
     }
-    invoke("import_received", json!({ "dir": dir })).await
+    invoke("import_received", json!({ "dir": dir, "target": target })).await
+}
+
+/// RECEIVE side: where crossings land + the last import folder.
+pub async fn get_drop_settings() -> Result<DropSettings, String> {
+    if mock() {
+        return Ok(mock::drop_settings());
+    }
+    invoke("get_drop_settings", ()).await
+}
+
+/// RECEIVE side: point incoming data at another folder (None = Documents).
+pub async fn set_receive_root(root: Option<String>) -> Result<DropSettings, String> {
+    if mock() {
+        return Ok(mock::set_receive_root(root));
+    }
+    invoke("set_receive_root", json!({ "root": root })).await
+}
+
+/// Free bytes on the drive holding `path`.
+pub async fn free_space(path: &str) -> Result<Option<u64>, String> {
+    if mock() {
+        return Ok(Some(if path.starts_with('D') { 1_800_000_000_000 } else { 96_000_000_000 }));
+    }
+    invoke("free_space", json!({ "path": path })).await
+}
+
+/// Open Explorer for one folder. None = cancelled.
+pub async fn pick_folder() -> Result<Option<String>, String> {
+    if mock() {
+        return Ok(Some("D:\\Data".into()));
+    }
+    let got: Option<String> = invoke(
+        "plugin:dialog|open",
+        json!({ "options": { "directory": true, "multiple": false } }),
+    )
+    .await?;
+    Ok(got)
 }
 
 /// RECEIVE side: force one browser's import ("Overwrite?"), backing up originals first.
