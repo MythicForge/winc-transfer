@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const DISCOVERY_PORT: u16 = 50737; // UDP beacon
 pub const TRANSFER_PORT: u16 = 50738; // preferred TCP port (so manual IP entry needs no port)
-pub const PROTO_MAGIC: &str = "WINC1";
+/// Bumped to 2 in 0.9.0 (heartbeats + chunked manifest) — older builds see
+/// "not a WINC peer" instead of a garbled stream.
+pub const PROTO_MAGIC: &str = "WINC2";
 
 /// Direct-cable network link state, surfaced to the UI.
 #[derive(Serialize, Clone, Default)]
@@ -133,10 +135,12 @@ pub struct HelloAck {
     pub ok: bool,
 }
 
-/// Manifest, SENDER -> RECEIVER, precedes the raw file stream.
+/// Manifest header, SENDER -> RECEIVER. Followed by `chunks` frames, each a
+/// JSON `Vec<FileEntry>`, then the raw file stream. Chunked so a tree of
+/// hundreds of thousands of files never hits the per-frame size cap.
 #[derive(Serialize, Deserialize)]
-pub struct Manifest {
-    pub files: Vec<FileEntry>,
+pub struct ManifestHead {
     pub total_bytes: u64,
     pub total_files: u64,
+    pub chunks: u32,
 }

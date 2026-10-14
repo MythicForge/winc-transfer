@@ -9,6 +9,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const BUF: usize = 256 * 1024;
+/// Manifest entries per frame — ~3 MB of JSON, far under crypto::MAX_FRAME.
+const MANIFEST_CHUNK: usize = 20_000;
+/// How often an idle paired sender pings the receiver. Between pairing and the
+/// manifest the sender may spend minutes scanning folders and waiting on the
+/// user; without traffic, routers / Windows / power-managed adapters drop the
+/// idle connection and the receiver never gets the transfer.
+pub const HEARTBEAT: Duration = Duration::from_secs(10);
+/// Receiver gives up if nothing at all (not even a ping) arrives for this long
+/// before the manifest — the old PC slept, crashed or lost the network.
+const PRE_MANIFEST_WAIT: Duration = Duration::from_secs(120);
 
 /* ---------------- link detection ---------------- */
 
@@ -323,6 +333,13 @@ pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<En
     Ok(enc)
 }
 
+/// Keep-alive while paired but not yet sending: an empty frame. The receiver
+/// skips empty frames until the manifest arrives.
+pub fn heartbeat(stream: &mut EncryptedStream) -> io::Result<()> {
+    stream.write_frame(&[])?;
+    stream.flush()
+}
+
 /// Stream the selected items over an already-paired connection.
 pub fn send_files<F: Fn(TransferProgress)>(
     stream: &mut EncryptedStream,
@@ -334,21 +351,26 @@ pub fn send_files<F: Fn(TransferProgress)>(
         .iter()
         .map(|i| FileEntry {
             rel: i.rel.clone(),
-            size: std::fs::metadata(&i.abs).map(|m| m.len()).unwrap_or(0),
+            size: i.size,
         })
         .collect();
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     let total_files = entries.len() as u64;
+    let chunks = entries.chunks(MANIFEST_CHUNK);
 
     log::info!(
-        "manifest: {total_files} file(s), {:.2} GB",
-        total_bytes as f64 / 1e9
+        "manifest: {total_files} file(s), {:.2} GB in {} chunk(s)",
+        total_bytes as f64 / 1e9,
+        chunks.len()
     );
-    stream.write_json(&Manifest {
-        files: entries.clone(),
+    stream.write_json(&ManifestHead {
         total_bytes,
         total_files,
+        chunks: chunks.len() as u32,
     })?;
+    for chunk in chunks {
+        stream.write_json(&chunk)?;
+    }
 
     let mut sent: u64 = 0;
     let mut buf = vec![0u8; BUF];
@@ -502,22 +524,57 @@ pub fn receive_files<F: Fn(TransferProgress)>(
     cancel: &Arc<AtomicBool>,
     emit: F,
 ) -> io::Result<()> {
-    let manifest: Manifest = stream.read_json().inspect_err(|e| {
-        log::error!("could not read the manifest: {e}");
-    })?;
+    // The sender may still be scanning / the user still choosing: skip its
+    // heartbeats until the manifest header shows up, but stop waiting if it
+    // goes fully silent.
+    stream.set_read_timeout(Some(PRE_MANIFEST_WAIT))?;
+    let head: ManifestHead = loop {
+        let frame = stream.read_frame().map_err(|e| {
+            if matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
+                log::error!(
+                    "no word from the sender for {}s before the transfer started",
+                    PRE_MANIFEST_WAIT.as_secs()
+                );
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "lost contact with the old PC before the transfer started (asleep, closed, or network dropped)",
+                )
+            } else {
+                log::error!("could not read the manifest: {e}");
+                e
+            }
+        })?;
+        if frame.is_empty() {
+            log::trace!("sender heartbeat");
+            continue;
+        }
+        break serde_json::from_slice(&frame).map_err(|e| {
+            log::error!("bad manifest header: {e}");
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
+    };
+    let mut files: Vec<FileEntry> = Vec::with_capacity(head.total_files as usize);
+    for _ in 0..head.chunks {
+        let part: Vec<FileEntry> = stream.read_json().inspect_err(|e| {
+            log::error!("could not read the manifest: {e}");
+        })?;
+        files.extend(part);
+    }
+    // data flows continuously from here, as before — no read deadline
+    stream.set_read_timeout(None)?;
     log::info!(
         "manifest received: {} file(s), {:.2} GB",
-        manifest.total_files,
-        manifest.total_bytes as f64 / 1e9
+        head.total_files,
+        head.total_bytes as f64 / 1e9
     );
 
     let mut got: u64 = 0;
     let start = Instant::now();
     let mut last_emit = Instant::now() - Duration::from_secs(1);
 
-    for (idx, entry) in manifest.files.iter().enumerate() {
+    for (idx, entry) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            log::warn!("receive cancelled after {idx}/{} file(s)", manifest.total_files);
+            log::warn!("receive cancelled after {idx}/{} file(s)", head.total_files);
             emit(TransferProgress::error("Cancelled"));
             return Ok(());
         }
@@ -543,9 +600,9 @@ pub fn receive_files<F: Fn(TransferProgress)>(
                 let secs = start.elapsed().as_secs_f64().max(0.001);
                 emit(TransferProgress::running(
                     got,
-                    manifest.total_bytes,
+                    head.total_bytes,
                     idx as u64,
-                    manifest.total_files,
+                    head.total_files,
                     got as f64 / secs,
                     &entry.rel,
                 ));
@@ -560,7 +617,7 @@ pub fn receive_files<F: Fn(TransferProgress)>(
         got as f64 / start.elapsed().as_secs_f64().max(0.001) / 1e6,
         dest.display()
     );
-    emit(TransferProgress::done(manifest.total_bytes, manifest.total_files));
+    emit(TransferProgress::done(head.total_bytes, head.total_files));
     Ok(())
 }
 
@@ -614,4 +671,51 @@ pub fn local_ipv4s() -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pair over loopback, idle with heartbeats (as during a long scan), then
+    /// send a tree big enough to need more than one manifest chunk.
+    #[test]
+    fn heartbeats_then_chunked_manifest() {
+        let root = std::env::temp_dir().join(format!("winc-test-{}", std::process::id()));
+        let src = root.join("src");
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = MANIFEST_CHUNK + 500;
+        let mut items = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = src.join(format!("f{i}.txt"));
+            let body = format!("file {i}");
+            std::fs::write(&p, &body).unwrap();
+            items.push(Item { abs: p, rel: format!("Documents/f{i}.txt"), size: body.len() as u64 });
+        }
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (c2, d2) = (cancel.clone(), dest.clone());
+        let rx = std::thread::spawn(move || {
+            let (mut s, _) = accept_and_verify(&listener, "123456", &c2).unwrap();
+            receive_files(&mut s, &d2, &c2, |_| {}).unwrap();
+        });
+
+        let peer = Peer { name: "t".into(), ip: "127.0.0.1".into(), port };
+        let mut s = connect_and_pair(&peer, "tester", "123456").unwrap();
+        for _ in 0..3 {
+            heartbeat(&mut s).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        send_files(&mut s, &items, &cancel, |_| {}).unwrap();
+        rx.join().unwrap();
+
+        for i in [0, MANIFEST_CHUNK, n - 1] {
+            let got = std::fs::read_to_string(dest.join(format!("Documents/f{i}.txt"))).unwrap();
+            assert_eq!(got, format!("file {i}"));
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

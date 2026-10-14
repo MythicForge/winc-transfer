@@ -9,6 +9,13 @@ const PW_CAVEAT: &str = "Saved passwords are locked to this Windows account (DPA
 pub struct Item {
     pub abs: PathBuf,
     pub rel: String,
+    /// Taken during the walk, so the manifest needs no second stat per file —
+    /// on a few hundred thousand files that pass alone took minutes.
+    pub size: u64,
+}
+
+fn file_size(p: &Path) -> u64 {
+    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
 }
 
 pub(crate) fn env_dir(key: &str) -> Option<PathBuf> {
@@ -86,6 +93,7 @@ fn browser_files(id: &str) -> Vec<Item> {
             let abs = base.join(n);
             if abs.exists() {
                 out.push(Item {
+                    size: file_size(&abs),
                     abs,
                     rel: format!("Browser/{}/{}", rel_root, n),
                 });
@@ -208,10 +216,7 @@ pub fn list_sources() -> Vec<SourceGroup> {
             continue;
         }
         log::debug!("browser '{id}': {} file(s) found", files.len());
-        let bytes: u64 = files
-            .iter()
-            .filter_map(|i| std::fs::metadata(&i.abs).ok().map(|m| m.len()))
-            .sum();
+        let bytes: u64 = files.iter().map(|i| i.size).sum();
         groups.push(SourceGroup {
             id,
             label,
@@ -312,6 +317,7 @@ fn expand_custom(path: &Path, name: &str) -> Vec<Item> {
         return vec![Item {
             abs: path.to_path_buf(),
             rel: format!("Custom/{name}"),
+            size: file_size(path),
         }];
     }
     expand_folder(path, &format!("Custom/{name}"))
@@ -344,6 +350,8 @@ fn expand_folder(root: &Path, label: &str) -> Vec<Item> {
                 out.push(Item {
                     abs: e.path().to_path_buf(),
                     rel: format!("{}/{}", label, rel),
+                    // walkdir's metadata comes from the directory listing on Windows — no extra syscall
+                    size: e.metadata().map(|m| m.len()).unwrap_or(0),
                 });
             }
         }

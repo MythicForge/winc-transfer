@@ -3,7 +3,7 @@ use crate::{crypto, net, sources};
 use rand::Rng;
 use serde::Serialize;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -31,6 +31,9 @@ pub struct Session {
     pub beacon_stop: Mutex<Option<Arc<AtomicBool>>>,
     pub listener: Mutex<Option<TcpListener>>,
     pub send_stream: Mutex<Option<crypto::EncryptedStream>>,
+    /// Bumped on every pair, so a keep-alive thread from an earlier pairing
+    /// knows to stop.
+    pub pair_gen: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -170,9 +173,33 @@ pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String
         log::info!("paired with {}:{} — encrypted channel open", peer.ip, peer.port);
         let state = app.state::<Session>();
         *state.send_stream.lock().unwrap() = Some(stream);
+        let gen = state.pair_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let app = app.clone();
+        std::thread::spawn(move || keep_alive(app, gen));
         Ok(())
     })
     .await
+}
+
+/// Ping the receiver while the paired connection sits idle (folder scan, the
+/// user choosing, file-list build). Stops once start_send takes the stream,
+/// on cancel, or when a newer pairing replaces this one.
+fn keep_alive(app: AppHandle, gen: u64) {
+    loop {
+        std::thread::sleep(net::HEARTBEAT);
+        let state = app.state::<Session>();
+        if state.pair_gen.load(Ordering::Relaxed) != gen {
+            return;
+        }
+        let mut guard = state.send_stream.lock().unwrap();
+        let Some(stream) = guard.as_mut() else { return };
+        if let Err(e) = net::heartbeat(stream) {
+            // leave the stream in place: start_send will surface the real error
+            log::warn!("keep-alive to the receiver failed: {e}");
+            return;
+        }
+        log::trace!("keep-alive sent");
+    }
 }
 
 #[tauri::command]
@@ -206,17 +233,28 @@ pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), St
     blocking(move || {
         let state = app.state::<Session>();
         state.cancel.store(false, Ordering::Relaxed);
-        let mut stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
+        if state.send_stream.lock().unwrap().is_none() {
             log::error!("start_send called with no paired connection");
-            "not paired — pair with the new PC first"
-        })?;
+            return Err("not paired — pair with the new PC first".into());
+        }
 
+        // Walk everything BEFORE taking the stream, so the keep-alive thread
+        // keeps the receiver's connection alive however long this takes.
         log::info!("send starting — groups: {}", group_ids.join(", "));
+        let t = std::time::Instant::now();
         let mut items = Vec::new();
         for (id, expanded) in sources::expand_all(&group_ids) {
             log::info!("  group '{id}' expands to {} file(s)", expanded.len());
             items.extend(expanded);
         }
+        log::info!("file list built in {:.1}s", t.elapsed().as_secs_f64());
+        if state.cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
+            log::error!("paired connection went away while building the file list");
+            "the connection to the new PC was closed — pair again"
+        })?;
 
         let cancel = state.cancel.clone();
         let emit = emitter(&app);

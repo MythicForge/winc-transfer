@@ -124,6 +124,11 @@ impl EncryptedStream {
             .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "code mismatch"))
     }
 
+    /// Bound how long a read may block (None = forever).
+    pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.reader.get_ref().set_read_timeout(d)
+    }
+
     pub fn flush(&mut self) -> io::Result<()> {
         self.writer.flush()
     }

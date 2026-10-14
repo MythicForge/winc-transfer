@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.9.0**
+**Version 0.9.1**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -216,7 +216,17 @@ still shows how things got there.
 
 ## Version notes
 
-**0.9.0** (current)
+**0.9.1** (current)
+- **Large-transfer timeout fix** — after pairing, the sender used to stay
+  silent through the folder scan, the user's choice and the file-list build;
+  on big PCs that idle gap got the connection dropped before any data moved.
+  The sender now pings every 10 s until the transfer starts, the file list is
+  sent in 20,000-entry chunks (no single-frame size cap), and file sizes come
+  from the first walk instead of a second stat per file. The receiver reports
+  a clear error if the old PC goes silent for 2 minutes before the transfer.
+- Wire protocol bumped to `WINC2` — **both PCs must run 0.9.1**.
+
+**0.9.0**
 - **UI rewritten in Rust** with Leptos (CSR/wasm) in `ui/`. Same markup, class
   names and CSS, so the app looks identical; npm now only provides the Tauri
   CLI. The React UI is archived in `archive/react-ui/`.
