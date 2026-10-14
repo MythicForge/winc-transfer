@@ -1,5 +1,8 @@
 export type Role = "send" | "receive";
 
+/** Sender's payload mode: preset user data, or explorer-picked files/folders. */
+export type TransferMode = "user" | "custom";
+
 export type LinkStatus = {
   up: boolean;
   adapter: string | null; // e.g. "Thunderbolt Bridge" / "USB4 Net"
@@ -26,8 +29,8 @@ export type SourceGroup = {
   id: string;
   label: string;
   hint: string;
-  kind: "folder" | "browser";
-  path: string | null; // null for browser aggregate / custom
+  kind: "folder" | "file" | "browser"; // "file" only for Custom Transfer picks
+  path: string | null; // null for browser aggregate
   bytes: number;
   items: number;
   /** caveat text, e.g. saved passwords are DPAPI-bound. */

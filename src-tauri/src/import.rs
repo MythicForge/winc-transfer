@@ -431,6 +431,24 @@ pub fn import_received(dump: &Path) -> ImportReport {
             continue;
         }
 
+        // explorer picks (files or folders) → Documents\<name>
+        if name == "Custom" {
+            let Ok(picks) = fs::read_dir(&p) else { continue };
+            let docs = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+            for c in picks.filter_map(|c| c.ok()) {
+                let pick = c.file_name().to_string_lossy().to_string();
+                // import_folder on a single file walks just that file to target
+                entries.push(import_folder(
+                    &c.path(),
+                    &docs.join(&pick),
+                    &pick,
+                    Some(format!("→ Documents\\{pick}")),
+                    &mut log,
+                ));
+            }
+            continue;
+        }
+
         match known.iter().find(|(l, _)| *l == name) {
             Some((label, Some(target))) => {
                 entries.push(import_folder(&p, target, label, None, &mut log));

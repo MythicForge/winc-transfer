@@ -1,4 +1,5 @@
 use crate::model::SourceGroup;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -227,12 +228,97 @@ pub fn list_sources() -> Vec<SourceGroup> {
     groups
 }
 
-/// Expand a selected group id into concrete files to stream.
-pub fn expand(id: &str) -> Vec<Item> {
-    // custom folder added via the picker: id = "custom-<absolute path>"
-    if let Some(path) = id.strip_prefix("custom-") {
-        return expand_folder(Path::new(path), &safe(Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().as_str()));
+/// Size up paths picked in the explorer (Custom Transfer, or "+ Add a folder")
+/// so the UI can show real totals. Paths that vanished since picking are dropped.
+pub fn measure_paths(paths: &[String]) -> Vec<SourceGroup> {
+    let mut out = Vec::new();
+    for raw in paths {
+        let p = Path::new(raw);
+        let (kind, bytes, items) = if p.is_file() {
+            ("file", std::fs::metadata(p).map(|m| m.len()).unwrap_or(0), 1)
+        } else if p.is_dir() {
+            let (b, n) = measure_dir(p);
+            ("folder", b, n)
+        } else {
+            log::warn!("picked path no longer exists — skipped: {raw}");
+            continue;
+        };
+        log::debug!("picked {kind} '{raw}': {items} file(s), {bytes} bytes");
+        out.push(SourceGroup {
+            id: format!("custom-{raw}"),
+            label: p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| raw.clone()),
+            hint: raw.clone(),
+            kind: kind.into(),
+            path: Some(raw.clone()),
+            bytes,
+            items,
+            caveat: None,
+            selected: true,
+        });
     }
+    out
+}
+
+/// Expand every selected group id into concrete files to stream, as
+/// (id, files) so the caller can log each group.
+///
+/// Explorer picks (id = "custom-<absolute path>", a file or a folder) land
+/// under Custom/<name> on the wire, so a pick named "Documents" or "Browser"
+/// can't collide with the preset groups. Picks sharing a name get " (2)",
+/// " (3)"... so they stay separate on the receiver instead of merging.
+pub fn expand_all(ids: &[String]) -> Vec<(String, Vec<Item>)> {
+    let mut used: HashSet<String> = HashSet::new();
+    ids.iter()
+        .map(|id| {
+            let items = match id.strip_prefix("custom-") {
+                Some(path) => {
+                    let path = Path::new(path);
+                    let name = safe(
+                        &path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Picked".into()),
+                    );
+                    expand_custom(path, &unique_name(&name, path.is_file(), &mut used))
+                }
+                None => expand(id),
+            };
+            (id.clone(), items)
+        })
+        .collect()
+}
+
+/// `name`, or the first free "name (n)" — before the extension for files.
+fn unique_name(name: &str, is_file: bool, used: &mut HashSet<String>) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if is_file && i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut cand = name.to_string();
+    let mut n = 2;
+    // Windows paths are case-insensitive, so "Notes" and "notes" collide
+    while !used.insert(cand.to_lowercase()) {
+        cand = format!("{stem} ({n}){ext}");
+        n += 1;
+    }
+    cand
+}
+
+fn expand_custom(path: &Path, name: &str) -> Vec<Item> {
+    if path.is_file() {
+        return vec![Item {
+            abs: path.to_path_buf(),
+            rel: format!("Custom/{name}"),
+        }];
+    }
+    expand_folder(path, &format!("Custom/{name}"))
+}
+
+/// Expand a preset group id (user folder or browser) into concrete files.
+fn expand(id: &str) -> Vec<Item> {
     let folder = match id {
         "documents" => dirs::document_dir().map(|p| (p, "Documents")),
         "desktop" => dirs::desktop_dir().map(|p| (p, "Desktop")),

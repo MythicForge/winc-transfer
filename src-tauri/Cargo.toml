@@ -1,6 +1,6 @@
 [package]
 name = "winc"
-version = "0.7.0"
+version = "0.8.0"
 description = "WINC — direct-cable PC data crossing"
 authors = ["you"]
 license = ""

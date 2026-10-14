@@ -35,9 +35,12 @@ export default function SessionController() {
     // SENDER: fire the stream once we reach the transfer step
     if (role === "send" && step === "transfer" && started.current !== "send") {
       started.current = "send";
-      const ids = state.sources.filter((s) => s.selected).map((s) => s.id);
+      const ids =
+        state.mode === "custom"
+          ? state.picks.map((p) => p.id)
+          : state.sources.filter((s) => s.selected).map((s) => s.id);
       if (state.peer) {
-        uiLog.info("ui::transfer", `starting send of ${ids.length} group(s)`);
+        uiLog.info("ui::transfer", `starting ${state.mode} send of ${ids.length} group(s)`);
         backend
           .startSend(state.peer, ids, onProgress)
           .catch((e) => uiLog.error("ui::transfer", `send failed: ${errText(e)}`));
@@ -70,7 +73,7 @@ export default function SessionController() {
         .then((dir) => dispatch({ t: "receivedDir", dir }))
         .catch((e) => uiLog.error("ui::receive", `receive failed: ${errText(e)}`));
     }
-  }, [role, step, state.peer, state.sources, dispatch]);
+  }, [role, step, state.peer, state.mode, state.sources, state.picks, dispatch]);
 
   return null;
 }

@@ -27,6 +27,7 @@ pub fn run() {
             commands::list_local_ips,
             commands::pair,
             commands::list_sources,
+            commands::measure_paths,
             commands::start_send,
             commands::receive,
             commands::cancel,

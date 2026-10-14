@@ -38,6 +38,8 @@ export interface Backend {
   pair(peer: Peer, code: string): Promise<void>;
   /** SEND side: the default + browser data groups discovered on this pc. */
   listSources(): Promise<SourceGroup[]>;
+  /** SEND side: size up explorer-picked files/folders (ids are "custom-<path>"). */
+  measurePaths(paths: string[]): Promise<SourceGroup[]>;
   /** SEND side: begin streaming selected groups; progress via cb. */
   startSend(
     peer: Peer,
@@ -114,6 +116,9 @@ function tauriBackend(): Backend {
     listSources() {
       return invoke("list_sources");
     },
+    measurePaths(paths) {
+      return invoke("measure_paths", { paths });
+    },
     async startSend(peer, groupIds, onProgress) {
       const un = await listen<TransferProgress>("winc://progress", onProgress);
       void peer; // pairing already bound the connection server-side
@@ -157,6 +162,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function mockBackend(): Backend {
   let cancelled = false;
+  const picked: SourceGroup[] = []; // measurePaths results, so custom sends have sizes
   const sources: SourceGroup[] = [
     { id: "docs", label: "Documents", hint: "C:\\Users\\you\\Documents", kind: "folder", path: "Documents", bytes: 4_820_000_000, items: 12840, selected: true },
     { id: "desktop", label: "Desktop", hint: "C:\\Users\\you\\Desktop", kind: "folder", path: "Desktop", bytes: 640_000_000, items: 214, selected: true },
@@ -209,9 +215,28 @@ function mockBackend(): Backend {
       await sleep(600);
       return sources.map((s) => ({ ...s }));
     },
+    async measurePaths(paths) {
+      await sleep(300);
+      // fake but stable sizes so the custom list looks plausible in the preview
+      const out = paths.map((p, i) => {
+        const isFile = /\.[a-z0-9]{1,5}$/i.test(p);
+        return {
+          id: `custom-${p}`,
+          label: p.split(/[\\/]/).pop() || p,
+          hint: p,
+          kind: isFile ? ("file" as const) : ("folder" as const),
+          path: p,
+          bytes: isFile ? 4_200_000 * (i + 1) : 1_300_000_000 * (i + 1),
+          items: isFile ? 1 : 340 * (i + 1),
+          selected: true,
+        };
+      });
+      picked.push(...out);
+      return out.map((s) => ({ ...s }));
+    },
     async startSend(_peer, groupIds, onProgress) {
       cancelled = false;
-      const chosen = sources.filter((s) => groupIds.includes(s.id));
+      const chosen = [...sources, ...picked].filter((s) => groupIds.includes(s.id));
       const bytesTotal = chosen.reduce((a, s) => a + s.bytes, 0);
       const filesTotal = chosen.reduce((a, s) => a + s.items, 0);
       let bytesSent = 0;

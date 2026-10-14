@@ -195,6 +195,12 @@ pub async fn list_sources() -> Result<Vec<SourceGroup>, String> {
     .await
 }
 
+/// Size up explorer picks (files or folders) for the Custom Transfer list.
+#[tauri::command]
+pub async fn measure_paths(paths: Vec<String>) -> Result<Vec<SourceGroup>, String> {
+    blocking(move || Ok(sources::measure_paths(&paths))).await
+}
+
 #[tauri::command]
 pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), String> {
     blocking(move || {
@@ -207,8 +213,7 @@ pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), St
 
         log::info!("send starting — groups: {}", group_ids.join(", "));
         let mut items = Vec::new();
-        for id in &group_ids {
-            let expanded = sources::expand(id);
+        for (id, expanded) in sources::expand_all(&group_ids) {
             log::info!("  group '{id}' expands to {} file(s)", expanded.len());
             items.extend(expanded);
         }

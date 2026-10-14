@@ -12,6 +12,7 @@ import type {
   Peer,
   Role,
   SourceGroup,
+  TransferMode,
   TransferProgress,
 } from "./lib/types";
 
@@ -26,7 +27,9 @@ export type State = {
   peer: Peer | null;
   selfPeer: Peer | null; // receiver's own address, shown for manual pairing
   code: string; // shown (receive) or entered (send)
+  mode: TransferMode; // sender: preset "User Transfer" or explorer "Custom Transfer"
   sources: SourceGroup[];
+  picks: SourceGroup[]; // Custom Transfer list, all sent (no checkboxes)
   progress: TransferProgress;
   receivedDir: string | null; // where the crossing landed, for "Import into place"
 };
@@ -48,7 +51,9 @@ export const initialState: State = {
   peer: null,
   selfPeer: null,
   code: "",
+  mode: "user",
   sources: [],
+  picks: [],
   progress: emptyProgress,
   receivedDir: null,
 };
@@ -61,11 +66,36 @@ type Action =
   | { t: "selfPeer"; peer: Peer }
   | { t: "code"; code: string }
   | { t: "sources"; sources: SourceGroup[] }
+  | { t: "mode"; mode: TransferMode }
+  | { t: "picks-add"; picks: SourceGroup[] }
+  | { t: "pick-remove"; id: string }
+  | { t: "picks-clear" }
   | { t: "toggle"; id: string }
   | { t: "select-all"; on: boolean }
   | { t: "receivedDir"; dir: string }
   | { t: "progress"; progress: TransferProgress }
   | { t: "reset" };
+
+/** Windows paths: case-insensitive, either slash. */
+const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+const inside = (child: string, parent: string) => norm(child).startsWith(norm(parent) + "\\");
+
+/** Add explorer picks without sending anything twice: skip exact repeats and
+ *  anything already covered by a picked folder; a new folder swallows earlier
+ *  picks that live inside it. */
+function mergePicks(cur: SourceGroup[], add: SourceGroup[]): SourceGroup[] {
+  let out = [...cur];
+  for (const p of add) {
+    const path = p.path ?? "";
+    const covered = out.some(
+      (o) => norm(o.path ?? "") === norm(path) || (o.kind === "folder" && inside(path, o.path ?? "")),
+    );
+    if (covered) continue;
+    if (p.kind === "folder") out = out.filter((o) => !inside(o.path ?? "", path));
+    out.push(p);
+  }
+  return out;
+}
 
 function reducer(s: State, a: Action): State {
   switch (a.t) {
@@ -83,6 +113,14 @@ function reducer(s: State, a: Action): State {
       return { ...s, code: a.code };
     case "sources":
       return { ...s, sources: a.sources };
+    case "mode":
+      return { ...s, mode: a.mode };
+    case "picks-add":
+      return { ...s, picks: mergePicks(s.picks, a.picks) };
+    case "pick-remove":
+      return { ...s, picks: s.picks.filter((p) => p.id !== a.id) };
+    case "picks-clear":
+      return { ...s, picks: [] };
     case "toggle":
       return {
         ...s,
