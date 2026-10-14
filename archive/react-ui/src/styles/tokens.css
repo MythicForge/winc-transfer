@@ -1,0 +1,62 @@
+/* WINC — "Signal Bench" design tokens
+   Two accents carry meaning: cobalt = data/signal, copper = the physical cable. */
+:root {
+  /* palette */
+  --paper: #f5f7fa;
+  --paper-2: #eef1f6;
+  --panel: #ffffff;
+  --ink: #1a1f2b;
+  --ink-2: #3a4256;
+  --slate: #8a93a6;
+  --hairline: #d7dce6;
+
+  --cobalt: #2e5bff;        /* data / signal */
+  --cobalt-soft: #e5ebff;
+  --copper: #c6683b;        /* hardware / cable */
+  --copper-soft: #f6e6dd;
+  --good: #1f9d6b;
+  --warn: #c99a1e;
+  --bad: #d1443b;
+
+  /* type */
+  --display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  /* scale */
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: 2.25rem;
+  --step-4: 3.25rem;
+
+  /* structure */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --gap: 20px;
+  --rail-w: 264px;
+
+  --shadow: 0 1px 2px rgba(26, 31, 43, 0.06), 0 8px 24px rgba(26, 31, 43, 0.06);
+  --shadow-lift: 0 2px 4px rgba(26, 31, 43, 0.08), 0 14px 40px rgba(26, 31, 43, 0.1);
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #10131a;
+    --paper-2: #0b0e14;
+    --panel: #171b24;
+    --ink: #eef1f6;
+    --ink-2: #b7bfce;
+    --slate: #808a9d;
+    --hairline: #262c38;
+    --cobalt: #6c8bff;
+    --cobalt-soft: #1b2338;
+    --copper: #e08a5c;
+    --copper-soft: #2a1c14;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+    --shadow-lift: 0 2px 4px rgba(0, 0, 0, 0.5), 0 14px 40px rgba(0, 0, 0, 0.45);
+  }
+}
