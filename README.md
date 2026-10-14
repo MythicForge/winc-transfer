@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.10.0**
+**Version 0.10.1**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -216,7 +216,14 @@ still shows how things got there.
 
 ## Version notes
 
-**0.10.0** (current)
+**0.10.1** (current)
+- Mid-transfer decrypt failures no longer say "code mismatch" — that's only
+  true during pairing. After the manifest, it means the data was altered in
+  transit; the error now says so and names the file, and the log records the
+  frame number and how far in it happened.
+- Added an opt-in multi-file stress test (`cargo test --lib -- --ignored stress`).
+
+**0.10.0**
 - **Choose where data lands (receiver)** — the code screen shows where incoming
   files go (default `Documents\WINC Received`) with the drive's free space, and
   **Change folder…** points it at any folder/drive. Remembered between runs

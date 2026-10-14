@@ -517,6 +517,27 @@ pub fn accept_and_verify(
     ))
 }
 
+/// A decrypt failure AFTER pairing isn't a wrong code (the manifest already
+/// decrypted): the bytes changed in transit. Name it, and where it happened.
+fn corrupted(e: io::Error, stream: &EncryptedStream, rel: &str, got: u64) -> io::Error {
+    if e.kind() != io::ErrorKind::PermissionDenied {
+        return e;
+    }
+    log::error!(
+        "integrity check failed on frame #{} while receiving '{rel}', {:.2} GB in — data was altered in transit",
+        stream.frames_read(),
+        got as f64 / 1e9
+    );
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "data arrived damaged while receiving '{rel}' (failed the integrity check). \
+             Pairing was fine — something on the network path altered the data. Try again; \
+             if it keeps happening, use the direct cable or see the log"
+        ),
+    )
+}
+
 /// Read the manifest + file stream into `dest`, emitting progress.
 pub fn receive_files<F: Fn(TransferProgress)>(
     stream: &mut EncryptedStream,
@@ -603,7 +624,7 @@ pub fn receive_files<F: Fn(TransferProgress)>(
         })?;
         // Read one decrypted frame per chunk until the empty end-of-file frame.
         loop {
-            let chunk = stream.read_frame()?;
+            let chunk = stream.read_frame().map_err(|e| corrupted(e, stream, &entry.rel, got))?;
             if chunk.is_empty() {
                 break; // end of this file
             }
@@ -728,6 +749,57 @@ mod tests {
         for i in [0, MANIFEST_CHUNK, n - 1] {
             let got = std::fs::read_to_string(dest.join(format!("Documents/f{i}.txt"))).unwrap();
             assert_eq!(got, format!("file {i}"));
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Volume stress: a couple of GB of incompressible data in mixed file
+    /// sizes, as a real crossing would. `cargo test --lib -- --ignored stress`
+    #[test]
+    #[ignore]
+    fn stress_large_transfer() {
+        use std::io::Write as _;
+        let root = std::env::temp_dir().join(format!("winc-stress-{}", std::process::id()));
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        std::fs::create_dir_all(&src).unwrap();
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut items = Vec::new();
+        for i in 0..400usize {
+            // sizes from 0 B to ~24 MB, deliberately not multiples of BUF
+            let size = match i % 5 { 0 => 0, 1 => 1234, 2 => BUF - 1, 3 => BUF * 3 + 77, _ => 6_000_000 + i * 4099 };
+            let p = src.join(format!("f{i}.bin"));
+            let mut f = std::io::BufWriter::new(std::fs::File::create(&p).unwrap());
+            let mut left = size;
+            while left > 0 {
+                seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
+                let b = seed.to_le_bytes();
+                let n = left.min(8);
+                f.write_all(&b[..n]).unwrap();
+                left -= n;
+            }
+            drop(f);
+            items.push(Item { abs: p, rel: format!("Documents/f{i}.bin"), size: size as u64 });
+        }
+        let total: u64 = items.iter().map(|i| i.size).sum();
+        eprintln!("stress: {} files, {:.2} GB", items.len(), total as f64 / 1e9);
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (c2, d2) = (cancel.clone(), dest.clone());
+        let rx = std::thread::spawn(move || {
+            let (mut s, _) = accept_and_verify(&listener, "123456", &c2).unwrap();
+            receive_files(&mut s, &d2, &c2, |_| {})
+        });
+        let peer = Peer { name: "t".into(), ip: "127.0.0.1".into(), port };
+        let mut s = connect_and_pair(&peer, "tester", "123456").unwrap();
+        heartbeat(&mut s).unwrap();
+        send_files(&mut s, &items, &cancel, |_| {}).unwrap();
+        rx.join().unwrap().expect("receive failed");
+        for it in &items {
+            let a = std::fs::read(&it.abs).unwrap();
+            let b = std::fs::read(dest.join(&it.rel)).unwrap();
+            assert!(a == b, "content differs: {}", it.rel);
         }
         std::fs::remove_dir_all(&root).ok();
     }
