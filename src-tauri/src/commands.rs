@@ -34,6 +34,9 @@ pub struct Session {
     /// Bumped on every pair, so a keep-alive thread from an earlier pairing
     /// knows to stop.
     pub pair_gen: AtomicU64,
+    /// Who we paired with and the code — kept so a broken transfer can
+    /// reconnect and resume without the user re-pairing.
+    pub pair_info: Mutex<Option<(Peer, String)>>,
 }
 
 #[derive(Serialize)]
@@ -172,6 +175,7 @@ pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String
         })?;
         log::info!("paired with {}:{} — encrypted channel open", peer.ip, peer.port);
         let state = app.state::<Session>();
+        *state.pair_info.lock().unwrap() = Some((peer.clone(), digits.clone()));
         *state.send_stream.lock().unwrap() = Some(stream);
         let gen = state.pair_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let app = app.clone();
@@ -251,15 +255,22 @@ pub async fn start_send(group_ids: Vec<String>, app: AppHandle) -> Result<(), St
         if state.cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let mut stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
+        let stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
             log::error!("paired connection went away while building the file list");
             "the connection to the new PC was closed — pair again"
         })?;
 
+        let (peer, digits) = state.pair_info.lock().unwrap().clone().ok_or("not paired")?;
+        let name = net::host_name("This PC");
+        let reconnect = || {
+            log::info!("reconnecting to {}:{} to resume", peer.ip, peer.port);
+            net::connect_and_pair(&peer, &name, &digits)
+        };
+
         let cancel = state.cancel.clone();
         let emit = emitter(&app);
         let t = std::time::Instant::now();
-        let out = net::send_files(&mut stream, &items, &cancel, emit).map_err(|e| {
+        let out = crate::transfer::send(stream, &items, &cancel, reconnect, emit).map_err(|e| {
             log::error!("send failed: {e}");
             let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
             e.to_string()
@@ -286,8 +297,8 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
         let cancel = state.cancel.clone();
 
         log::info!("waiting for a sender to connect…");
-        let (mut stream, peer) =
-            net::accept_and_verify(&listener, &code, &cancel).map_err(|e| {
+        let (stream, peer) =
+            net::accept_and_verify(&listener, &code, &cancel, None).map_err(|e| {
                 log::error!("accept/verify failed: {e}");
                 e.to_string()
             })?;
@@ -309,7 +320,14 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
 
         let emit = emitter(&app);
         let t = std::time::Instant::now();
-        net::receive_files(&mut stream, &dest, &cancel, emit).map_err(|e| {
+        // The listener stays open for the whole transfer: if the link breaks,
+        // the sender reconnects here with the same code and resumes.
+        let reaccept = |deadline| {
+            let (s, p) = net::accept_and_verify(&listener, &code, &cancel, Some(deadline))?;
+            log::info!("sender '{}' reconnected from {}", p.name, p.ip);
+            Ok(s)
+        };
+        crate::transfer::receive(stream, &dest, &cancel, reaccept, emit).map_err(|e| {
             log::error!("receive failed: {e}");
             let _ = app.emit("winc://progress", TransferProgress::error(&e.to_string()));
             e.to_string()

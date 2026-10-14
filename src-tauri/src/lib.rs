@@ -6,6 +6,7 @@ mod model;
 mod net;
 mod settings;
 mod sources;
+mod transfer;
 
 use commands::Session;
 

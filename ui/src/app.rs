@@ -38,7 +38,7 @@ pub fn App() -> impl IntoView {
 
     // Ctrl+L (or Cmd+L) toggles the log drawer
     let hotkey = window_event_listener(ev::keydown, move |e| {
-        if (e.ctrl_key() || e.meta_key()) && e.key().to_lowercase() == "l" {
+        if (e.ctrl_key() || e.meta_key()) && crate::format::key_of(&e).to_lowercase() == "l" {
             e.prevent_default();
             logs_open.update(|o| *o = !*o);
         }

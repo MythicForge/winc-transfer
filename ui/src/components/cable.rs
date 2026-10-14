@@ -10,6 +10,7 @@ pub fn Cable() -> impl IntoView {
     let store = use_store();
 
     let flowing = Memo::new(move |_| store.progress.with(|p| p.state == XferState::Running));
+    let reconnecting = Memo::new(move |_| store.progress.with(|p| p.state == XferState::Reconnecting));
     let linked = Memo::new(move |_| {
         store.link.with(|l| l.up) && (store.peer.with(|p| p.is_some()) || flowing.get())
     });
@@ -54,7 +55,9 @@ pub fn Cable() -> impl IntoView {
     };
 
     let readout = move || {
-        if flowing.get() {
+        if reconnecting.get() {
+            view! { <span class="mono">"Reconnecting…"</span> }.into_any()
+        } else if flowing.get() {
             let bps = store.progress.with(|p| p.bytes_per_sec);
             view! { <span class="mono">{rate(bps)}</span> }.into_any()
         } else if linked.get() {

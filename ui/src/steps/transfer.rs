@@ -11,7 +11,11 @@ pub fn TransferStep() -> impl IntoView {
     let p = store.progress;
     let sending = move || store.role.get() == Some(Role::Send);
     // memo: progress ticks several times a second must not rebuild the button
-    let running = Memo::new(move |_| p.with(|p| p.state == XferState::Running));
+    // in flight (stoppable): streaming, or re-pairing after the link broke
+    let running = Memo::new(move |_| {
+        p.with(|p| matches!(p.state, XferState::Running | XferState::Reconnecting))
+    });
+    let reconnecting = Memo::new(move |_| p.with(|p| p.state == XferState::Reconnecting));
     let pct = move || {
         p.with(|p| {
             if p.bytes_total > 0 {
@@ -65,6 +69,13 @@ pub fn TransferStep() -> impl IntoView {
             <div class="progressbar">
                 <div class="progressbar__fill" style:width=move || format!("{}%", pct())></div>
             </div>
+            <Show when=move || reconnecting.get()>
+                <p class="field-warn" style="margin: 10px 0 8px">
+                    "The connection was interrupted or data arrived damaged. WINCI is reconnecting "
+                    "and will pick up from the file that was in flight — nothing already received "
+                    "is sent again."
+                </p>
+            </Show>
             <div class="nowfile">
                 {move || {
                     p.with(|p| match (&p.current_file, p.state) {

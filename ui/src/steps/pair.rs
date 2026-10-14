@@ -213,7 +213,7 @@ pub fn PairStep() -> impl IntoView {
                                 prop:value=move || addr.get()
                                 on:input=move |e| addr.set(event_target_value(&e))
                                 on:keydown=move |e| {
-                                    if e.key() == "Enter" {
+                                    if crate::format::key_of(&e) == "Enter" {
                                         if let Some(el) = code_ref.get_untracked() {
                                             let _ = el.focus();
                                         }
@@ -247,7 +247,7 @@ pub fn PairStep() -> impl IntoView {
                     }
                 }
                 on:keydown=move |e| {
-                    if e.key() == "Enter" {
+                    if crate::format::key_of(&e) == "Enter" {
                         submit();
                     }
                 }

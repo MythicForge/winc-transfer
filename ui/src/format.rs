@@ -58,3 +58,13 @@ pub fn clock(ts: f64) -> String {
         d.get_milliseconds()
     )
 }
+
+/// `KeyboardEvent.key`, or "" when the event has none. Chromium fires bare
+/// "keydown" events with no `key` (e.g. picking an autofill suggestion), and
+/// web-sys's `key()` panics on those.
+pub fn key_of(e: &web_sys::KeyboardEvent) -> String {
+    js_sys::Reflect::get(e, &"key".into())
+        .ok()
+        .and_then(|k| k.as_string())
+        .unwrap_or_default()
+}

@@ -79,6 +79,8 @@ pub enum XferState {
     #[default]
     Idle,
     Running,
+    /// link broke mid-transfer; the two PCs are re-pairing to resume
+    Reconnecting,
     Paused,
     Done,
     Error,
@@ -89,6 +91,7 @@ impl XferState {
         match self {
             XferState::Idle => "idle",
             XferState::Running => "running",
+            XferState::Reconnecting => "reconnecting",
             XferState::Paused => "paused",
             XferState::Done => "done",
             XferState::Error => "error",

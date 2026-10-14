@@ -129,6 +129,12 @@ impl EncryptedStream {
         self.recv_n
     }
 
+    /// Bound how long a write may block (None = forever) — so a sender whose
+    /// receiver vanished errors out (and resumes) instead of hanging.
+    pub fn set_write_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.writer.get_ref().set_write_timeout(d)
+    }
+
     /// Bound how long a read may block (None = forever).
     pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
         self.reader.get_ref().set_read_timeout(d)

@@ -182,7 +182,26 @@ pub async fn start_send(group_ids: &[String], on_progress: &dyn Fn(TransferProgr
             bytes_total as f64 / 1e9
         ),
     );
-    for g in &chosen {
+    for (gi, g) in chosen.iter().enumerate() {
+        // one fake interruption before the second group, for the preview
+        if gi == 1 {
+            log::warn("mock", "link broke — reconnecting to resume");
+            for attempt in 1..=2 {
+                on_progress(TransferProgress {
+                    state: XferState::Reconnecting,
+                    bytes_sent: bytes_sent as u64,
+                    bytes_total,
+                    files_sent: files_sent as u64,
+                    files_total,
+                    current_file: Some(format!(
+                        "Connection interrupted — reconnecting (attempt {attempt})…"
+                    )),
+                    ..Default::default()
+                });
+                sleep(900).await;
+            }
+            log::info("mock", "resumed");
+        }
         log::debug("mock", &format!("streaming '{}' ({} items)", g.label, g.items));
         const STEPS: u32 = 22;
         for i in 0..STEPS {

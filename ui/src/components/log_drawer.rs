@@ -21,7 +21,7 @@ pub fn LogDrawer(open: RwSignal<bool>) -> impl IntoView {
     });
     let on_up = window_event_listener(ev::pointerup, move |_| drag.set_value(None));
     let on_key = window_event_listener(ev::keydown, move |e| {
-        if open.get_untracked() && e.key() == "Escape" {
+        if open.get_untracked() && crate::format::key_of(&e) == "Escape" {
             open.set(false);
         }
     });
