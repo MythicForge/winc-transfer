@@ -383,18 +383,34 @@ pub fn retry_browser(dump: &Path, label: &str) -> Result<ImportEntry, String> {
 }
 
 /// Walk the top level of a crossing dump and route each group into place.
-pub fn import_received(dump: &Path) -> ImportReport {
+/// With `base` (a folder the user picked, e.g. on a bigger drive) the user
+/// folders land as <base>\Documents, <base>\Desktop, ... and custom picks as
+/// <base>\<name>; browser data always goes to the browsers.
+pub fn import_received(dump: &Path, base: Option<&Path>) -> ImportReport {
     let mut entries: Vec<ImportEntry> = Vec::new();
     let mut log: Vec<LogRow> = Vec::new();
 
+    let user_dir = |label: &str, d: Option<PathBuf>| match base {
+        Some(b) => Some(b.join(label)),
+        None => d,
+    };
     let known: [(&str, Option<PathBuf>); 6] = [
-        ("Documents", dirs::document_dir()),
-        ("Desktop", dirs::desktop_dir()),
-        ("Pictures", dirs::picture_dir()),
-        ("Downloads", dirs::download_dir()),
-        ("Music", dirs::audio_dir()),
-        ("Videos", dirs::video_dir()),
+        ("Documents", user_dir("Documents", dirs::document_dir())),
+        ("Desktop", user_dir("Desktop", dirs::desktop_dir())),
+        ("Pictures", user_dir("Pictures", dirs::picture_dir())),
+        ("Downloads", user_dir("Downloads", dirs::download_dir())),
+        ("Music", user_dir("Music", dirs::audio_dir())),
+        ("Videos", user_dir("Videos", dirs::video_dir())),
     ];
+    // custom picks / unknown folders: Documents\<name>, or <base>\<name>
+    let (loose_root, loose_note) = match base {
+        Some(b) => (b.to_path_buf(), b.display().to_string()),
+        None => (
+            dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")),
+            "Documents".to_string(),
+        ),
+    };
+    let note = |target: &Path| base.map(|_| format!("→ {}", target.display()));
 
     let rd = match fs::read_dir(dump) {
         Ok(r) => r,
@@ -431,9 +447,26 @@ pub fn import_received(dump: &Path) -> ImportReport {
             continue;
         }
 
+        // explorer picks (files or folders) → Documents\<name> (or <base>\<name>)
+        if name == "Custom" {
+            let Ok(picks) = fs::read_dir(&p) else { continue };
+            for c in picks.filter_map(|c| c.ok()) {
+                let pick = c.file_name().to_string_lossy().to_string();
+                // import_folder on a single file walks just that file to target
+                entries.push(import_folder(
+                    &c.path(),
+                    &loose_root.join(&pick),
+                    &pick,
+                    Some(format!("→ {loose_note}\\{pick}")),
+                    &mut log,
+                ));
+            }
+            continue;
+        }
+
         match known.iter().find(|(l, _)| *l == name) {
             Some((label, Some(target))) => {
-                entries.push(import_folder(&p, target, label, None, &mut log));
+                entries.push(import_folder(&p, target, label, note(target), &mut log));
             }
             Some((label, None)) => entries.push(ImportEntry {
                 label: label.to_string(),
@@ -442,15 +475,14 @@ pub fn import_received(dump: &Path) -> ImportReport {
                 detail: Some("couldn't resolve this folder on the new PC".into()),
                 browser_label: None,
             }),
-            // custom folder from the sender's picker → Documents\<name>
+            // custom folder from a pre-0.8 sender's picker → Documents\<name>
             None => {
-                let docs = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-                let target = docs.join(&name);
+                let target = loose_root.join(&name);
                 entries.push(import_folder(
                     &p,
                     &target,
                     &name,
-                    Some(format!("→ Documents\\{name}")),
+                    Some(format!("→ {loose_note}\\{name}")),
                     &mut log,
                 ));
             }

@@ -1,0 +1,12 @@
+# `trunk serve` from this dir = browser preview in mock mode (no backend);
+# Tauri runs the same commands via beforeDevCommand / beforeBuildCommand.
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+port = 1420
+open = false
+
+[watch]
+ignore = ["dist"]

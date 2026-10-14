@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="src/assets/WINCI.svg" alt="WINCI logo" width="180" />
+  <img src="ui/assets/WINCI.svg" alt="WINCI logo" width="180" />
 </p>
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.6.1**
+**Version 0.11.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -15,12 +15,13 @@ ways, your choice:
 Either way there's no cloud and no accounts — the data crosses directly,
 **end-to-end encrypted**.
 
-Built with **Tauri v2** (Rust core + a React/TypeScript UI).
+Built with **Tauri v2** — Rust core + a Rust UI (**Leptos**, compiled to
+WebAssembly and rendered in the Tauri webview). Rust end to end.
 
 ## Branding
 
-- Logo: `src/assets/WINCI.svg` (shown on the app's start screen and this page).
-- Icon pack: `src/assets/WINCI.ico` (10 sizes, 16–256 px). Copies extracted into
+- Logo: `ui/assets/WINCI.svg` (shown on the app's start screen and this page).
+- Icon pack: `ui/assets/WINCI.ico` (10 sizes, 16–256 px). Copies extracted into
   `src-tauri/icons/` (`icon.ico`, `32x32.png`, `128x128.png`, `128x128@2x.png`,
   `icon.png`) are what `npm run tauri build` bundles into the installer and exe.
 
@@ -95,18 +96,20 @@ Source of truth for the wire protocol: `src-tauri/src/model.rs`, `net.rs`, and
 ## Project layout
 
 ```
-src/                     React UI (the "Signal Bench" design)
-  lib/api.ts             backend abstraction: real Tauri calls OR a browser mock
-  lib/types.ts,format.ts shared types + number formatting
-  store.tsx              app state machine (role -> step)
-  components/Cable.tsx   the signature live-cable visualization
-  components/...         rail, role picker, session controller
-  components/LogPanel.tsx  activity log view (drawer + popout share it)
-  components/LogDrawer.tsx in-app bottom drawer (Ctrl+L)
-  LogWindow.tsx          root for the detached window (index.html?view=log)
-  lib/log.ts             frontend end of the log bus
-  steps/...              one file per wizard step
+ui/                      Leptos UI (Rust -> wasm; the "Signal Bench" design)
+  index.html, Trunk.toml trunk entry + config (serves on :1420)
+  src/api/mod.rs         backend abstraction: real Tauri calls OR a browser mock
+  src/api/tauri.rs       raw bridge to window.__TAURI__ (invoke + events)
+  src/api/mock.rs        scripted mock backend for browser preview
+  src/types.rs,format.rs wire types + number formatting
+  src/store.rs           app state (role -> step), one signal per field
+  src/app.rs             app shell + step router
+  src/components/        cable visualization, rail, role picker, session controller,
+                         log panel/drawer/window (index.html?view=log)
+  src/log.rs             frontend end of the log bus
+  src/steps/             one file per wizard step
   styles/                tokens.css - global.css - app.css - log.css
+archive/react-ui/        the retired React/TypeScript UI (<= 0.8), kept for reference
 src-tauri/src/
   logbus.rs              log fan-out: ring buffer + winc://log event + log file
   model.rs               wire types + progress
@@ -119,7 +122,7 @@ src-tauri/src/
 ```
 
 ### Mock mode
-Opened in a plain browser (no Tauri), `api.ts` falls back to a scripted mock so
+Opened in a plain browser (no Tauri), `ui/src/api` falls back to a scripted mock so
 the whole flow is drivable — useful for design work on non-Windows machines. A
 "Demo mode" chip shows bottom-right. The real backend is used automatically
 inside the packaged app.
@@ -129,8 +132,9 @@ inside the packaged app.
 ## Build & run
 
 ### Prerequisites (on the Windows dev machine)
-- **Node 18+**
-- **Rust** (stable) via <https://rustup.rs>
+- **Node 18+** (only for the Tauri CLI)
+- **Rust** (stable) via <https://rustup.rs>, plus the wasm target and trunk:
+  `rustup target add wasm32-unknown-unknown` · `cargo install trunk --locked`
 - **Microsoft C++ Build Tools** (MSVC) + **WebView2** runtime (ships with Win 11)
 
 ```powershell
@@ -149,7 +153,7 @@ npm run tauri build
 
 ### UI-only preview (any OS)
 ```bash
-npm run dev      # http://localhost:5173  -> runs in mock mode
+cd ui && trunk serve   # http://localhost:1420  -> runs in mock mode
 ```
 
 ---
@@ -212,7 +216,75 @@ still shows how things got there.
 
 ## Version notes
 
-**0.7.0** (current)
+**0.11.0** (current)
+- **Auto-resume** — if data arrives damaged (fails its integrity check) or the
+  connection drops mid-transfer, the receiver keeps listening, the sender
+  reconnects with the same pairing code, and the transfer picks up at the file
+  that was in flight; nothing already received is sent again. Retries back off
+  for up to 2 minutes; damage that keeps hitting the same file (4×) or more
+  than 30 resumes ends the transfer with a clear error instead of looping.
+  The UI shows *Reconnecting…* and Stop still works. Disk-side failures
+  (drive full, can't create a file) are not retried.
+- The sender only reports success once the receiver confirms the last file.
+- New `transfer.rs` holds the file stream + resume; tests break the link on
+  purpose through a fault-injecting proxy (`cargo test --lib`).
+- Wire protocol bumped to `WINC3` — **both PCs must run 0.11.0**.
+
+**0.10.2**
+- Fixed a UI crash (`TypeError … reading 'length'`) when Chromium fired a
+  key event with no key — e.g. picking an autofill suggestion in the IP field.
+- Stress test now mirrors a real web-project crossing (30k files, ~3.5 GB).
+
+**0.10.1**
+- Mid-transfer decrypt failures no longer say "code mismatch" — that's only
+  true during pairing. After the manifest, it means the data was altered in
+  transit; the error now says so and names the file, and the log records the
+  frame number and how far in it happened.
+- Added an opt-in multi-file stress test (`cargo test --lib -- --ignored stress`).
+
+**0.10.0**
+- **Choose where data lands (receiver)** — the code screen shows where incoming
+  files go (default `Documents\WINC Received`) with the drive's free space, and
+  **Change folder…** points it at any folder/drive. Remembered between runs
+  (`settings.json` in the app config dir). A transfer that won't fit is stopped
+  up front with a clear message instead of failing part-way.
+- **Choose where Import puts it** — the Done screen imports into *Your user
+  folders* (as before) or *A folder you choose* (`<folder>\Documents`,
+  `<folder>\Desktop`, … and custom picks straight in). The last folder is
+  pre-selected next time. Browser data still goes to the browsers.
+- **Pop-out log fix** — the log window opened blank and couldn't be closed on
+  Windows: it was created from a synchronous command, which deadlocks there.
+- Log level dropdown is readable in dark mode.
+
+**0.9.2**
+- **Blank-window fix** — the packaged app showed an empty window: the log bus
+  started a background task before the UI mounted, which panics in Leptos.
+  It now starts after mount. Demo mode never hit this path.
+- **Startup error reporter** — if the UI ever fails to start, the error is shown
+  in the window and written to `winc.log` (`ui::boot`) instead of a blank screen.
+
+**0.9.1**
+- **Large-transfer timeout fix** — after pairing, the sender used to stay
+  silent through the folder scan, the user's choice and the file-list build;
+  on big PCs that idle gap got the connection dropped before any data moved.
+  The sender now pings every 10 s until the transfer starts, the file list is
+  sent in 20,000-entry chunks (no single-frame size cap), and file sizes come
+  from the first walk instead of a second stat per file. The receiver reports
+  a clear error if the old PC goes silent for 2 minutes before the transfer.
+- Wire protocol bumped to `WINC2` — **both PCs must run 0.9.1**.
+
+**0.9.0**
+- **UI rewritten in Rust** with Leptos (CSR/wasm) in `ui/`. Same markup, class
+  names and CSS, so the app looks identical; npm now only provides the Tauri
+  CLI. The React UI is archived in `archive/react-ui/`.
+
+**0.8.0**
+- **Custom Transfer** — the sender's payload step now chooses between
+  **User Transfer** (the preset folders + browsers) and **Custom Transfer**
+  (any files and folders picked in Explorer, from any drive). Picks travel as
+  `Custom/<name>` and import into `Documents\<name>`.
+
+**0.7.0**
 - **Activity log** — in-app drawer (Ctrl+L) and detachable window, backed by a
   ring buffer + rotating log file in the Rust backend (`logbus.rs`). Backend and
   UI both log; failures that the flow used to swallow now show up.

@@ -22,5 +22,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-src/assets/WINCI.ico.old
+archive/react-ui/src/assets/WINCI.ico.old
 ENCRYPTION_PLAN.md

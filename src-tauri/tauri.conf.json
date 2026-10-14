@@ -1,15 +1,16 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "WINCI",
-  "version": "0.7.0",
+  "version": "0.11.0",
   "identifier": "com.winc.app",
   "build": {
-    "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "trunk serve --config ui/Trunk.toml",
+    "beforeBuildCommand": "trunk build --release --config ui/Trunk.toml"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "WINCI — Data Crossing",

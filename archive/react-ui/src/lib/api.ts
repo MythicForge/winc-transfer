@@ -1,0 +1,333 @@
+/* Backend abstraction.
+ * In the packaged Tauri app -> calls Rust commands + listens to real events.
+ * In a plain browser (dev / design preview on non-Windows) -> a mock so the
+ * whole flow is drivable without two PCs. Detected via window.__TAURI_INTERNALS__.
+ */
+import { errText, uiLog } from "./log";
+import type {
+  AdapterInfo,
+  ImportEntry,
+  ImportReport,
+  LinkStatus,
+  Peer,
+  SourceGroup,
+  TransferProgress,
+} from "./types";
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Fixed TCP port the receiver prefers, so manual IP entry needs no port. */
+export const TRANSFER_PORT = 50738;
+
+type ProgressCb = (p: TransferProgress) => void;
+type LinkCb = (l: LinkStatus) => void;
+type PeerCb = (p: Peer) => void;
+
+export interface Backend {
+  /** Poll/subscribe the direct-cable network link. */
+  watchLink(cb: LinkCb): () => void;
+  /** All network adapters this PC sees, classified — for the connect diagnostics. */
+  listAdapters(): Promise<AdapterInfo[]>;
+  /** RECEIVE side: open listener, return the 6-digit pairing code + our address. */
+  startReceiver(name: string): Promise<{ code: string; peer: Peer }>;
+  /** SEND side: look for a receiver beacon on the link-local subnet. */
+  discoverPeer(): Promise<Peer | null>;
+  /** Every IPv4 on this PC (direct-cable link first), for manual pairing. */
+  listLocalIps(): Promise<string[]>;
+  /** SEND side: connect to peer and verify the code. */
+  pair(peer: Peer, code: string): Promise<void>;
+  /** SEND side: the default + browser data groups discovered on this pc. */
+  listSources(): Promise<SourceGroup[]>;
+  /** SEND side: size up explorer-picked files/folders (ids are "custom-<path>"). */
+  measurePaths(paths: string[]): Promise<SourceGroup[]>;
+  /** SEND side: begin streaming selected groups; progress via cb. */
+  startSend(
+    peer: Peer,
+    groupIds: string[],
+    onProgress: ProgressCb,
+  ): Promise<void>;
+  /** RECEIVE side: wait for + accept an incoming transfer; progress via cb.
+   *  Resolves with the folder the crossing landed in. */
+  receive(onPeer: PeerCb, onProgress: ProgressCb): Promise<string>;
+  /** RECEIVE side: move a finished crossing into the real folders / browsers. */
+  importReceived(dir: string): Promise<ImportReport>;
+  /** RECEIVE side: force one browser's import ("Overwrite?"), backing up originals first. */
+  importBrowserOverwrite(dir: string, label: string): Promise<ImportEntry>;
+  /** RECEIVE side: re-check one browser after "Open First" — re-runs its non-force
+   *  import so a newly-opened browser profile is picked up. */
+  importBrowserRetry(dir: string, label: string): Promise<ImportEntry>;
+  cancel(): Promise<void>;
+  /** Add a Windows Firewall allow-rule for WINCI on all profiles (UAC prompt). */
+  allowFirewall(): Promise<void>;
+}
+
+/* ---------------- Tauri backend ---------------- */
+
+/** Commands whose success is too frequent to log (the link poll runs every
+ *  1.5 s). Failures are always logged, however often they happen. */
+const QUIET = new Set(["get_link_status"]);
+
+function tauriBackend(): Backend {
+  // dynamic import keeps mock-only browsers from choking on the module
+  const invoke = async <T>(cmd: string, args?: Record<string, unknown>) => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const t = performance.now();
+    const ms = () => Math.round(performance.now() - t);
+    if (!QUIET.has(cmd)) uiLog.debug("ui::invoke", `→ ${cmd}`);
+    try {
+      const out = await invoke<T>(cmd, args);
+      if (!QUIET.has(cmd)) uiLog.debug("ui::invoke", `← ${cmd} ok in ${ms()}ms`);
+      return out;
+    } catch (e) {
+      // Every backend failure surfaces here, whatever the caller does with it.
+      uiLog.error("ui::invoke", `✕ ${cmd} failed after ${ms()}ms — ${errText(e)}`);
+      throw e;
+    }
+  };
+  const listen = async <T>(event: string, cb: (p: T) => void) => {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<T>(event, (e) => cb(e.payload));
+  };
+
+  return {
+    watchLink(cb) {
+      // APIPA (169.254) can take several seconds to self-assign after the cable
+      // links, so poll — a one-shot check misses the cable and latches onto Wi-Fi.
+      const tick = () => invoke<LinkStatus>("get_link_status").then(cb).catch(() => {});
+      tick();
+      const id = setInterval(tick, 1500);
+      return () => clearInterval(id);
+    },
+    listAdapters() {
+      return invoke("list_adapters");
+    },
+    startReceiver(name) {
+      return invoke("start_receiver", { name });
+    },
+    discoverPeer() {
+      return invoke("discover_peer");
+    },
+    listLocalIps() {
+      return invoke("list_local_ips");
+    },
+    pair(peer, code) {
+      return invoke("pair", { peer, code });
+    },
+    listSources() {
+      return invoke("list_sources");
+    },
+    measurePaths(paths) {
+      return invoke("measure_paths", { paths });
+    },
+    async startSend(peer, groupIds, onProgress) {
+      const un = await listen<TransferProgress>("winc://progress", onProgress);
+      void peer; // pairing already bound the connection server-side
+      try {
+        await invoke("start_send", { groupIds });
+      } finally {
+        un();
+      }
+    },
+    async receive(onPeer, onProgress) {
+      const unP = await listen<Peer>("winc://paired", onPeer);
+      const unG = await listen<TransferProgress>("winc://progress", onProgress);
+      try {
+        return await invoke<string>("receive");
+      } finally {
+        unP();
+        unG();
+      }
+    },
+    importReceived(dir) {
+      return invoke("import_received", { dir });
+    },
+    importBrowserOverwrite(dir, label) {
+      return invoke("import_browser_overwrite", { dir, label });
+    },
+    importBrowserRetry(dir, label) {
+      return invoke("import_browser_retry", { dir, label });
+    },
+    cancel() {
+      return invoke("cancel");
+    },
+    allowFirewall() {
+      return invoke("allow_firewall");
+    },
+  };
+}
+
+/* ---------------- Mock backend ---------------- */
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function mockBackend(): Backend {
+  let cancelled = false;
+  const picked: SourceGroup[] = []; // measurePaths results, so custom sends have sizes
+  const sources: SourceGroup[] = [
+    { id: "docs", label: "Documents", hint: "C:\\Users\\you\\Documents", kind: "folder", path: "Documents", bytes: 4_820_000_000, items: 12840, selected: true },
+    { id: "desktop", label: "Desktop", hint: "C:\\Users\\you\\Desktop", kind: "folder", path: "Desktop", bytes: 640_000_000, items: 214, selected: true },
+    { id: "pictures", label: "Pictures", hint: "C:\\Users\\you\\Pictures", kind: "folder", path: "Pictures", bytes: 18_200_000_000, items: 9021, selected: true },
+    { id: "downloads", label: "Downloads", hint: "C:\\Users\\you\\Downloads", kind: "folder", path: "Downloads", bytes: 7_100_000_000, items: 512, selected: false },
+    { id: "chrome", label: "Chrome — bookmarks, history & passwords", hint: "Default profile", kind: "browser", path: null, bytes: 210_400_000, items: 9, caveat: "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.", selected: true },
+    { id: "edge", label: "Edge — bookmarks, history & passwords", hint: "Default profile", kind: "browser", path: null, bytes: 88_400_000, items: 9, caveat: "Passwords are locked to this Windows account (DPAPI). They transfer but only unlock if you sign in with the same Microsoft account on the new PC.", selected: false },
+  ];
+
+  return {
+    watchLink(cb) {
+      cb({ up: false, adapter: null, localIp: null, kind: null });
+      const t = setTimeout(
+        () => cb({ up: true, adapter: "Thunderbolt Bridge", localIp: "169.254.42.7", kind: "thunderbolt" }),
+        2600,
+      );
+      return () => clearTimeout(t);
+    },
+    async listAdapters() {
+      await sleep(150);
+      return [
+        { name: "Thunderbolt Bridge", ip: "169.254.42.7", linkLocal: true, cable: true, kind: "thunderbolt" as const },
+        { name: "Wi-Fi", ip: "192.168.1.24", linkLocal: false, cable: false, kind: "network" as const },
+      ];
+    },
+    async startReceiver() {
+      await sleep(400);
+      uiLog.info("mock", `receiver ready on 169.254.42.9:${TRANSFER_PORT} — code issued`);
+      return { code: "418 620", peer: { name: "SURFACE-9", ip: "169.254.42.9", port: TRANSFER_PORT } };
+    },
+    async discoverPeer() {
+      uiLog.info("mock", "discovery: listening for a receiver beacon");
+      await sleep(1800);
+      uiLog.info("mock", "discovery: found 'SURFACE-9' at 169.254.42.9");
+      return { name: "SURFACE-9", ip: "169.254.42.9", port: TRANSFER_PORT };
+    },
+    async listLocalIps() {
+      await sleep(200);
+      return ["169.254.42.9", "192.168.1.24"];
+    },
+    async pair(_peer, code) {
+      await sleep(900);
+      if (code.replace(/\s/g, "").length !== 6) {
+        uiLog.error("mock", "pairing rejected — wrong code");
+        throw new Error("bad code");
+      }
+      uiLog.info("mock", "paired — encrypted channel open");
+    },
+    async listSources() {
+      await sleep(600);
+      return sources.map((s) => ({ ...s }));
+    },
+    async measurePaths(paths) {
+      await sleep(300);
+      // fake but stable sizes so the custom list looks plausible in the preview
+      const out = paths.map((p, i) => {
+        const isFile = /\.[a-z0-9]{1,5}$/i.test(p);
+        return {
+          id: `custom-${p}`,
+          label: p.split(/[\\/]/).pop() || p,
+          hint: p,
+          kind: isFile ? ("file" as const) : ("folder" as const),
+          path: p,
+          bytes: isFile ? 4_200_000 * (i + 1) : 1_300_000_000 * (i + 1),
+          items: isFile ? 1 : 340 * (i + 1),
+          selected: true,
+        };
+      });
+      picked.push(...out);
+      return out.map((s) => ({ ...s }));
+    },
+    async startSend(_peer, groupIds, onProgress) {
+      cancelled = false;
+      const chosen = [...sources, ...picked].filter((s) => groupIds.includes(s.id));
+      const bytesTotal = chosen.reduce((a, s) => a + s.bytes, 0);
+      const filesTotal = chosen.reduce((a, s) => a + s.items, 0);
+      let bytesSent = 0;
+      let filesSent = 0;
+      const start = performance.now();
+      uiLog.info(
+        "mock",
+        `send starting — ${chosen.length} group(s), ${filesTotal} file(s), ${(bytesTotal / 1e9).toFixed(2)} GB`,
+      );
+      for (const g of chosen) {
+        uiLog.debug("mock", `streaming '${g.label}' (${g.items} items)`);
+        const steps = 22;
+        for (let i = 0; i < steps; i++) {
+          if (cancelled) {
+            uiLog.warn("mock", "transfer cancelled");
+            onProgress({ state: "error", bytesSent, bytesTotal, filesSent, filesTotal, bytesPerSec: 0, currentFile: null, error: "Cancelled" });
+            return;
+          }
+          await sleep(90);
+          bytesSent += g.bytes / steps;
+          filesSent += g.items / steps;
+          const secs = (performance.now() - start) / 1000;
+          onProgress({
+            state: "running",
+            bytesSent: Math.min(bytesSent, bytesTotal),
+            bytesTotal,
+            filesSent: Math.round(Math.min(filesSent, filesTotal)),
+            filesTotal,
+            bytesPerSec: bytesSent / secs,
+            currentFile: `${g.label} — item ${Math.round((i / steps) * g.items)}`,
+          });
+        }
+      }
+      uiLog.info(
+        "mock",
+        `send finished in ${((performance.now() - start) / 1000).toFixed(1)}s`,
+      );
+      onProgress({ state: "done", bytesSent: bytesTotal, bytesTotal, filesSent: filesTotal, filesTotal, bytesPerSec: 0, currentFile: null });
+    },
+    async receive(onPeer, onProgress) {
+      uiLog.info("mock", "waiting for a sender to connect…");
+      await sleep(2000);
+      uiLog.info("mock", "sender 'OLD-DELL-7490' verified from 169.254.42.9");
+      onPeer({ name: "OLD-DELL-7490", ip: "169.254.42.9", port: 52128 });
+      await this.startSend({ name: "x", ip: "x", port: 0 }, ["docs", "desktop", "pictures", "chrome"], onProgress);
+      return "C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000";
+    },
+    async importReceived() {
+      await sleep(1500);
+      return {
+        entries: [
+          { label: "Documents", action: "imported" as const, count: 12840, detail: "3 kept both", browserLabel: null },
+          { label: "Desktop", action: "imported" as const, count: 214, detail: null, browserLabel: null },
+          { label: "Pictures", action: "imported" as const, count: 9021, detail: null, browserLabel: null },
+          { label: "Tax Stuff", action: "imported" as const, count: 96, detail: "→ Documents\\Tax Stuff", browserLabel: null },
+          { label: "Chrome (browser)", action: "skipped-not-fresh" as const, count: 0, detail: "Chrome already has data on this PC — use Overwrite to replace it with the old PC's (originals are backed up first).", browserLabel: "Chrome" },
+          { label: "Edge (browser)", action: "skipped-not-installed" as const, count: 0, detail: "Edge isn't installed on this PC (or has never been opened).", browserLabel: "Edge" },
+        ],
+      };
+    },
+    async importBrowserOverwrite(_dir, label) {
+      await sleep(1200);
+      return {
+        label: `${label} (browser)`,
+        action: "imported" as const,
+        count: 9,
+        detail: `overwrote 9 — originals in C:\\Users\\you\\Documents\\WINC Received\\crossing-1721000000\\Backup\\${label}`,
+        browserLabel: label,
+      };
+    },
+    async importBrowserRetry(_dir, label) {
+      await sleep(900);
+      // Simulate the user having opened the browser: profile now exists and is
+      // fresh, so the retry succeeds.
+      return {
+        label: `${label} (browser)`,
+        action: "imported" as const,
+        count: 9,
+        detail: null,
+        browserLabel: label,
+      };
+    },
+    async cancel() {
+      uiLog.warn("mock", "cancel — stopping everything in flight");
+      cancelled = true;
+    },
+    async allowFirewall() {
+      await sleep(600);
+    },
+  };
+}
+
+export const backend: Backend = isTauri ? tauriBackend() : mockBackend();
+export const MOCK = !isTauri;

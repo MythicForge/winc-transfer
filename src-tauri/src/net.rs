@@ -1,14 +1,18 @@
 use crate::crypto::{self, EncryptedStream};
 use crate::model::*;
-use crate::sources::Item;
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const BUF: usize = 256 * 1024;
+/// How often an idle paired sender pings the receiver. Between pairing and the
+/// manifest the sender may spend minutes scanning folders and waiting on the
+/// user; without traffic, routers / Windows / power-managed adapters drop the
+/// idle connection and the receiver never gets the transfer.
+pub const HEARTBEAT: Duration = Duration::from_secs(10);
+
 
 /* ---------------- link detection ---------------- */
 
@@ -323,126 +327,31 @@ pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<En
     Ok(enc)
 }
 
-/// Stream the selected items over an already-paired connection.
-pub fn send_files<F: Fn(TransferProgress)>(
-    stream: &mut EncryptedStream,
-    items: &[Item],
-    cancel: &Arc<AtomicBool>,
-    emit: F,
-) -> io::Result<()> {
-    let entries: Vec<FileEntry> = items
-        .iter()
-        .map(|i| FileEntry {
-            rel: i.rel.clone(),
-            size: std::fs::metadata(&i.abs).map(|m| m.len()).unwrap_or(0),
-        })
-        .collect();
-    let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
-    let total_files = entries.len() as u64;
-
-    log::info!(
-        "manifest: {total_files} file(s), {:.2} GB",
-        total_bytes as f64 / 1e9
-    );
-    stream.write_json(&Manifest {
-        files: entries.clone(),
-        total_bytes,
-        total_files,
-    })?;
-
-    let mut sent: u64 = 0;
-    let mut buf = vec![0u8; BUF];
-    let start = Instant::now();
-    let mut last_emit = Instant::now() - Duration::from_secs(1);
-    let mut failed: Vec<String> = Vec::new();
-
-    // Each file is streamed as a sequence of encrypted frames (one per ≤256 KB
-    // chunk), terminated by an empty frame. A file read never yields a 0-byte
-    // chunk, so the empty frame is an unambiguous end-of-file marker. This lets
-    // us skip an unreadable file (e.g. an un-hydrated OneDrive placeholder that
-    // fails mid-read with os error 362) without desyncing the receiver, which
-    // does not rely on the manifest sizes.
-    for (idx, item) in items.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            log::warn!("send cancelled after {idx}/{total_files} file(s)");
-            emit(TransferProgress::error("Cancelled"));
-            return Ok(());
-        }
-        log::trace!("sending {}", item.rel);
-        let mut ok = true;
-        match std::fs::File::open(&item.abs) {
-            Ok(mut f) => loop {
-                let n = match f.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    // cloud placeholder / IO fault mid-read: stop this file, keep the stream sane
-                    Err(e) => {
-                        log::warn!("read failed mid-file, skipping '{}': {e}", item.rel);
-                        ok = false;
-                        break;
-                    }
-                };
-                stream.write_frame(&buf[..n])?;
-                sent += n as u64;
-                if last_emit.elapsed() >= Duration::from_millis(150) {
-                    let secs = start.elapsed().as_secs_f64().max(0.001);
-                    emit(TransferProgress::running(
-                        sent,
-                        total_bytes,
-                        idx as u64,
-                        total_files,
-                        sent as f64 / secs,
-                        &item.rel,
-                    ));
-                    last_emit = Instant::now();
-                }
-            },
-            // locked/removed/placeholder: skip cleanly
-            Err(e) => {
-                log::warn!("cannot open, skipping '{}': {e}", item.rel);
-                ok = false;
-            }
-        }
-        // empty frame = end of this file
-        stream.write_frame(&[])?;
-        if !ok {
-            failed.push(item.rel.clone());
-        }
-    }
-    stream.flush()?;
-    log::info!(
-        "sent {:.2} GB in {:.1}s ({:.0} MB/s), {} skipped",
-        sent as f64 / 1e9,
-        start.elapsed().as_secs_f64(),
-        sent as f64 / start.elapsed().as_secs_f64().max(0.001) / 1e6,
-        failed.len()
-    );
-    if failed.is_empty() {
-        emit(TransferProgress::done(total_bytes, total_files));
-    } else {
-        log::error!("{} file(s) could not be read: {}", failed.len(), failed.join(", "));
-        emit(TransferProgress::error(&format!(
-            "{} file(s) could not be read (cloud/offline or locked): {}",
-            failed.len(),
-            failed.join(", ")
-        )));
-    }
-    Ok(())
+/// Keep-alive while paired but not yet sending: an empty frame. The receiver
+/// skips empty frames until the opening message arrives.
+pub fn heartbeat(stream: &mut EncryptedStream) -> io::Result<()> {
+    stream.write_frame(&[])?;
+    stream.flush()
 }
 
 /* ---------------- receiver side ---------------- */
 
 /// Accept one sender, verify the code, return the connection + peer identity.
-/// Polls so a `cancel` (Start over) can break out of the wait instead of blocking forever.
+/// Polls so a `cancel` (Start over) — or `deadline`, while waiting for a resume —
+/// can break out of the wait instead of blocking forever.
 pub fn accept_and_verify(
     listener: &TcpListener,
     code: &str,
-    cancel: &Arc<AtomicBool>,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
 ) -> io::Result<(EncryptedStream, Peer)> {
     listener.set_nonblocking(true)?;
     let (stream, addr) = loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "no sender connected in time"));
         }
         match listener.accept() {
             Ok(pair) => break pair,
@@ -493,75 +402,6 @@ pub fn accept_and_verify(
             port: addr.port(),
         },
     ))
-}
-
-/// Read the manifest + file stream into `dest`, emitting progress.
-pub fn receive_files<F: Fn(TransferProgress)>(
-    stream: &mut EncryptedStream,
-    dest: &Path,
-    cancel: &Arc<AtomicBool>,
-    emit: F,
-) -> io::Result<()> {
-    let manifest: Manifest = stream.read_json().inspect_err(|e| {
-        log::error!("could not read the manifest: {e}");
-    })?;
-    log::info!(
-        "manifest received: {} file(s), {:.2} GB",
-        manifest.total_files,
-        manifest.total_bytes as f64 / 1e9
-    );
-
-    let mut got: u64 = 0;
-    let start = Instant::now();
-    let mut last_emit = Instant::now() - Duration::from_secs(1);
-
-    for (idx, entry) in manifest.files.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            log::warn!("receive cancelled after {idx}/{} file(s)", manifest.total_files);
-            emit(TransferProgress::error("Cancelled"));
-            return Ok(());
-        }
-        let out_path = safe_join(dest, &entry.rel);
-        log::trace!("receiving {}", entry.rel);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).inspect_err(|e| {
-                log::error!("could not create {}: {e}", parent.display());
-            })?;
-        }
-        let mut out = std::fs::File::create(&out_path).inspect_err(|e| {
-            log::error!("could not create {}: {e}", out_path.display());
-        })?;
-        // Read one decrypted frame per chunk until the empty end-of-file frame.
-        loop {
-            let chunk = stream.read_frame()?;
-            if chunk.is_empty() {
-                break; // end of this file
-            }
-            out.write_all(&chunk)?;
-            got += chunk.len() as u64;
-            if last_emit.elapsed() >= Duration::from_millis(150) {
-                let secs = start.elapsed().as_secs_f64().max(0.001);
-                emit(TransferProgress::running(
-                    got,
-                    manifest.total_bytes,
-                    idx as u64,
-                    manifest.total_files,
-                    got as f64 / secs,
-                    &entry.rel,
-                ));
-                last_emit = Instant::now();
-            }
-        }
-    }
-    log::info!(
-        "wrote {:.2} GB in {:.1}s ({:.0} MB/s) to {}",
-        got as f64 / 1e9,
-        start.elapsed().as_secs_f64(),
-        got as f64 / start.elapsed().as_secs_f64().max(0.001) / 1e6,
-        dest.display()
-    );
-    emit(TransferProgress::done(manifest.total_bytes, manifest.total_files));
-    Ok(())
 }
 
 /// Join a relative path under `dest`, refusing any component that would escape it.

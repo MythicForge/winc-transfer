@@ -1,0 +1,171 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useReducer,
+  type Dispatch,
+  type ReactNode,
+} from "react";
+import { backend } from "./lib/api";
+import type {
+  LinkStatus,
+  Peer,
+  Role,
+  SourceGroup,
+  TransferMode,
+  TransferProgress,
+} from "./lib/types";
+
+export type SendStep = "connect" | "pair" | "select" | "transfer" | "done";
+export type RecvStep = "connect" | "code" | "wait" | "transfer" | "done";
+export type Step = SendStep | RecvStep;
+
+export type State = {
+  role: Role | null;
+  step: Step;
+  link: LinkStatus;
+  peer: Peer | null;
+  selfPeer: Peer | null; // receiver's own address, shown for manual pairing
+  code: string; // shown (receive) or entered (send)
+  mode: TransferMode; // sender: preset "User Transfer" or explorer "Custom Transfer"
+  sources: SourceGroup[];
+  picks: SourceGroup[]; // Custom Transfer list, all sent (no checkboxes)
+  progress: TransferProgress;
+  receivedDir: string | null; // where the crossing landed, for "Import into place"
+};
+
+const emptyProgress: TransferProgress = {
+  state: "idle",
+  bytesSent: 0,
+  bytesTotal: 0,
+  filesSent: 0,
+  filesTotal: 0,
+  bytesPerSec: 0,
+  currentFile: null,
+};
+
+export const initialState: State = {
+  role: null,
+  step: "connect",
+  link: { up: false, adapter: null, localIp: null, kind: null },
+  peer: null,
+  selfPeer: null,
+  code: "",
+  mode: "user",
+  sources: [],
+  picks: [],
+  progress: emptyProgress,
+  receivedDir: null,
+};
+
+type Action =
+  | { t: "role"; role: Role }
+  | { t: "link"; link: LinkStatus }
+  | { t: "step"; step: Step }
+  | { t: "peer"; peer: Peer }
+  | { t: "selfPeer"; peer: Peer }
+  | { t: "code"; code: string }
+  | { t: "sources"; sources: SourceGroup[] }
+  | { t: "mode"; mode: TransferMode }
+  | { t: "picks-add"; picks: SourceGroup[] }
+  | { t: "pick-remove"; id: string }
+  | { t: "picks-clear" }
+  | { t: "toggle"; id: string }
+  | { t: "select-all"; on: boolean }
+  | { t: "receivedDir"; dir: string }
+  | { t: "progress"; progress: TransferProgress }
+  | { t: "reset" };
+
+/** Windows paths: case-insensitive, either slash. */
+const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+const inside = (child: string, parent: string) => norm(child).startsWith(norm(parent) + "\\");
+
+/** Add explorer picks without sending anything twice: skip exact repeats and
+ *  anything already covered by a picked folder; a new folder swallows earlier
+ *  picks that live inside it. */
+function mergePicks(cur: SourceGroup[], add: SourceGroup[]): SourceGroup[] {
+  let out = [...cur];
+  for (const p of add) {
+    const path = p.path ?? "";
+    const covered = out.some(
+      (o) => norm(o.path ?? "") === norm(path) || (o.kind === "folder" && inside(path, o.path ?? "")),
+    );
+    if (covered) continue;
+    if (p.kind === "folder") out = out.filter((o) => !inside(o.path ?? "", path));
+    out.push(p);
+  }
+  return out;
+}
+
+function reducer(s: State, a: Action): State {
+  switch (a.t) {
+    case "role":
+      return { ...s, role: a.role, step: "connect" };
+    case "link":
+      return { ...s, link: a.link };
+    case "step":
+      return { ...s, step: a.step };
+    case "peer":
+      return { ...s, peer: a.peer };
+    case "selfPeer":
+      return { ...s, selfPeer: a.peer };
+    case "code":
+      return { ...s, code: a.code };
+    case "sources":
+      return { ...s, sources: a.sources };
+    case "mode":
+      return { ...s, mode: a.mode };
+    case "picks-add":
+      return { ...s, picks: mergePicks(s.picks, a.picks) };
+    case "pick-remove":
+      return { ...s, picks: s.picks.filter((p) => p.id !== a.id) };
+    case "picks-clear":
+      return { ...s, picks: [] };
+    case "toggle":
+      return {
+        ...s,
+        sources: s.sources.map((g) =>
+          g.id === a.id ? { ...g, selected: !g.selected } : g,
+        ),
+      };
+    case "select-all":
+      return {
+        ...s,
+        sources: s.sources.map((g) => ({ ...g, selected: a.on })),
+      };
+    case "receivedDir":
+      return { ...s, receivedDir: a.dir };
+    case "progress":
+      return { ...s, progress: a.progress };
+    case "reset":
+      return { ...initialState };
+    default:
+      return s;
+  }
+}
+
+const Ctx = createContext<{ state: State; dispatch: Dispatch<Action> } | null>(
+  null,
+);
+
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [state, dispatch] = useReducer(reducer, initialState);
+  return <Ctx.Provider value={{ state, dispatch }}>{children}</Ctx.Provider>;
+}
+
+export function useStore() {
+  const c = useContext(Ctx);
+  if (!c) throw new Error("useStore outside provider");
+  return c;
+}
+
+/** Reset the UI *and* stop any in-flight backend session (unblocks the
+ *  receiver's accept loop, ends transfers, stops the beacon). Use for every
+ *  "Start over" so the backend doesn't stay stuck listening. */
+export function useReset() {
+  const { dispatch } = useStore();
+  return useCallback(() => {
+    backend.cancel().catch(() => {});
+    dispatch({ t: "reset" });
+  }, [dispatch]);
+}

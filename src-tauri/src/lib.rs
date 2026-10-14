@@ -4,7 +4,9 @@ mod import;
 mod logbus;
 mod model;
 mod net;
+mod settings;
 mod sources;
+mod transfer;
 
 use commands::Session;
 
@@ -27,11 +29,15 @@ pub fn run() {
             commands::list_local_ips,
             commands::pair,
             commands::list_sources,
+            commands::measure_paths,
             commands::start_send,
             commands::receive,
             commands::cancel,
             commands::allow_firewall,
             commands::import_received,
+            commands::get_drop_settings,
+            commands::set_receive_root,
+            commands::free_space,
             commands::import_browser_overwrite,
             commands::import_browser_retry,
             logbus::get_logs,

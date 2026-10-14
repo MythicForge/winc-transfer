@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const DISCOVERY_PORT: u16 = 50737; // UDP beacon
 pub const TRANSFER_PORT: u16 = 50738; // preferred TCP port (so manual IP entry needs no port)
-pub const PROTO_MAGIC: &str = "WINC1";
+/// Bumped to 2 in 0.9.0 (heartbeats + chunked manifest) and 3 in 0.11.0
+/// (auto-resume) — older builds see "not a WINC peer" instead of a garbled stream.
+pub const PROTO_MAGIC: &str = "WINC3";
 
 /// Direct-cable network link state, surfaced to the UI.
 #[derive(Serialize, Clone, Default)]
@@ -52,7 +54,7 @@ pub struct SourceGroup {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
-    /// "idle" | "running" | "paused" | "done" | "error"
+    /// "idle" | "running" | "reconnecting" | "paused" | "done" | "error"
     pub state: String,
     pub bytes_sent: u64,
     pub bytes_total: u64,
@@ -74,6 +76,19 @@ impl TransferProgress {
             files_total: ftotal,
             bytes_per_sec: bps,
             current_file: Some(file.to_string()),
+            error: None,
+        }
+    }
+    /// The link broke mid-transfer and is being re-established.
+    pub fn reconnecting(sent: u64, total: u64, fsent: u64, ftotal: u64, note: &str) -> Self {
+        Self {
+            state: "reconnecting".into(),
+            bytes_sent: sent,
+            bytes_total: total,
+            files_sent: fsent,
+            files_total: ftotal,
+            bytes_per_sec: 0.0,
+            current_file: Some(note.to_string()),
             error: None,
         }
     }
@@ -133,10 +148,38 @@ pub struct HelloAck {
     pub ok: bool,
 }
 
-/// Manifest, SENDER -> RECEIVER, precedes the raw file stream.
+/// First real message on every connection, SENDER -> RECEIVER (after any
+/// heartbeats). `Start` begins a transfer: `chunks` frames of JSON
+/// `Vec<FileEntry>` follow, then the file stream. Chunked so a tree of hundreds
+/// of thousands of files never hits the per-frame size cap. `Resume` re-attaches
+/// a reconnecting sender to a transfer that broke; the receiver answers with
+/// `ResumeAt`.
 #[derive(Serialize, Deserialize)]
-pub struct Manifest {
-    pub files: Vec<FileEntry>,
-    pub total_bytes: u64,
-    pub total_files: u64,
+#[serde(tag = "t")]
+pub enum Opening {
+    Start {
+        transfer_id: u64,
+        total_bytes: u64,
+        total_files: u64,
+        chunks: u32,
+    },
+    Resume {
+        transfer_id: u64,
+    },
+}
+
+/// RECEIVER -> SENDER reply to `Opening::Resume`: restart the file stream at
+/// manifest index `next` (the file that was in flight is rewritten whole).
+#[derive(Serialize, Deserialize)]
+pub struct ResumeAt {
+    pub ok: bool,
+    pub next: u64,
+}
+
+/// RECEIVER -> SENDER after the last file is on disk. The sender only calls
+/// the transfer done once it has this — damage in the final frames would
+/// otherwise go unnoticed by the sender.
+#[derive(Serialize, Deserialize)]
+pub struct Finished {
+    pub ok: bool,
 }
