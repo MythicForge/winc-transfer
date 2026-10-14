@@ -11,8 +11,16 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 fn main() {
-    console_error_panic_hook::set_once();
-    log::init();
+    // panics also go to the page's boot reporter (index.html) and winc.log
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        let report = js_sys::Reflect::get(&js_sys::global(), &"__wincBootError".into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(f) = report {
+            let _ = f.call1(&wasm_bindgen::JsValue::NULL, &format!("panic: {info}").into());
+        }
+    }));
 
     let root = document()
         .get_element_by_id("root")
@@ -29,4 +37,8 @@ fn main() {
         })
         .forget();
     }
+
+    // After mount: mounting sets up the async executor that log::init's
+    // spawn_local needs — calling it earlier panics in the packaged app.
+    log::init();
 }

@@ -11,6 +11,34 @@
     <link data-trunk rel="css" href="styles/app.css" />
     <link data-trunk rel="css" href="styles/log.css" />
     <link data-trunk rel="rust" data-wasm-opt="z" />
+    <script>
+      // Boot-failure reporter. Release builds have no devtools, so if the wasm
+      // fails to load or panics before drawing anything, show the error on the
+      // page and push it into winc.log instead of leaving a blank window.
+      (function () {
+        var shown = false;
+        function report(msg) {
+          try {
+            window.__TAURI__.core.invoke("ui_log", { level: "error", target: "ui::boot", msg: String(msg) });
+          } catch (_) {}
+          var root = document.getElementById("root");
+          if (shown || !root || root.childElementCount > 0) return;
+          shown = true;
+          var pre = document.createElement("pre");
+          pre.style.cssText = "margin:24px;padding:16px;white-space:pre-wrap;font:13px monospace;color:#b3261e;background:#fff;border:1px solid #e0b4b0;border-radius:6px";
+          pre.textContent = "WINCI failed to start:\n\n" + msg;
+          document.body.appendChild(pre);
+        }
+        window.addEventListener("error", function (e) {
+          report((e.error && e.error.stack) || e.message || "unknown error");
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          report((r && (r.stack || r.message)) || r);
+        });
+        window.__wincBootError = report;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

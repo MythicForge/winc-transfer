@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.9.1**
+**Version 0.9.2**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -216,7 +216,14 @@ still shows how things got there.
 
 ## Version notes
 
-**0.9.1** (current)
+**0.9.2** (current)
+- **Blank-window fix** — the packaged app showed an empty window: the log bus
+  started a background task before the UI mounted, which panics in Leptos.
+  It now starts after mount. Demo mode never hit this path.
+- **Startup error reporter** — if the UI ever fails to start, the error is shown
+  in the window and written to `winc.log` (`ui::boot`) instead of a blank screen.
+
+**0.9.1**
 - **Large-transfer timeout fix** — after pairing, the sender used to stay
   silent through the folder scan, the user's choice and the file-list build;
   on big PCs that idle gap got the connection dropped before any data moved.

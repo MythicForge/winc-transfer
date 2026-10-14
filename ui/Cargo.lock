@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "winc-ui"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "console_error_panic_hook",
  "gloo-timers",

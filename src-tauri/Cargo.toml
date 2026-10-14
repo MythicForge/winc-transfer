@@ -1,6 +1,6 @@
 [package]
 name = "winc"
-version = "0.9.1"
+version = "0.9.2"
 description = "WINC — direct-cable PC data crossing"
 authors = ["you"]
 license = ""
@@ -12,7 +12,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3" }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 serde_json = "1.0"
@@ -20,7 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 # the `log` facade only — records are fanned out by our own logbus.rs (ring
 # buffer + winc://log event + rotating file), which tauri-plugin-log can't do
 log = "0.4"
-tauri = { version = "2.11.3" }
+tauri = { version = "2.11.3", features = [] }
 tauri-plugin-dialog = "2"
 
 # transfer engine
