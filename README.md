@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 1.0.1**
+**Version 1.0.2**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -217,12 +217,19 @@ still shows how things got there.
 
 ## Version notes
 
-**1.0.1** (current)
+**1.0.2** (current)
+- The spinner is gone: waiting lines show animated dots (".", "..", "...")
+  stepping 2.5× a second. On a Hyper-V Server 2019 VM (no GPU) the spinner
+  alone used ~80% CPU.
+- With no hardware GPU (WARP, llvmpipe or the CPU renderer — see the log's
+  `renderer:` line) the flowing cable animates at 4 fps instead of 30.
+
+**1.0.1**
 - Smooth scrolling: draws on the GPU again (wgpu), keeping the CPU renderer
   as the automatic fallback. CPU-only scrolling cost ~60 ms per step and lagged
   on high-DPI screens.
-- The spinner and the cable animate on their own instead of redrawing the whole
-  window 30× a second, and no longer leave trails (the spinner's ring smear).
+- The spinner and the cable animate on their own instead of rebuilding the
+  whole window 30× a second, and no longer leave trails (the spinner's ring smear).
 - The log records the renderer, GPU, OS and CPU at startup.
 
 **1.0.0**

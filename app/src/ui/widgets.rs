@@ -1,11 +1,12 @@
 //! Small building blocks shared by the screens: text helpers, the animated
-//! cable, the spinner.
+//! cable, the waiting dots.
 
 use super::style::{self, Pal, MONO};
 use super::Message;
-use iced::widget::canvas::{self, path::Arc, stroke, Frame, Geometry, LineCap, LineDash, Path, Stroke};
+use iced::widget::canvas::{self, stroke, Frame, Geometry, LineCap, LineDash, Path, Stroke};
 use iced::widget::{column, container, text, Text};
-use iced::{mouse, window, Color, Element, Point, Radians, Rectangle, Renderer, Theme};
+use iced::{mouse, window, Color, Element, Point, Rectangle, Renderer, Theme};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -50,7 +51,7 @@ pub fn panel_head<'a>(
 
 /* ---------- animation ---------- */
 
-// The spinner and the cable animate themselves: each frame they ask for the
+// The waiting dots and the cable animate themselves: each frame they ask for the
 // next redraw from inside the canvas, so the app's view isn't rebuilt 30
 // times a second just to move a few pixels.
 //
@@ -59,71 +60,83 @@ pub fn panel_head<'a>(
 // earlier frames could survive and pile up into trails.
 
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
-/// ~30 fps: smooth enough for a spinner and a few dots, half the redraws of 60.
+/// ~30 fps for the flowing cable on a real GPU.
 const FRAME: Duration = Duration::from_millis(33);
+/// 4 fps when the CPU does the drawing (no GPU: Hyper-V / server VMs). Every
+/// frame there costs CPU — WARP redraws the whole window — and a 30 fps
+/// spinner alone took ~80% of the CPU on a Server 2019 VM.
+const SOFTWARE_FRAME: Duration = Duration::from_millis(250);
+
+/// Set at startup once iced reports the renderer (see `is_software`).
+pub static SOFTWARE: AtomicBool = AtomicBool::new(false);
+
+/// Is this renderer the CPU in disguise? The CPU fallback itself, or a
+/// software GPU: Windows' WARP ("Microsoft Basic Render Driver"), Mesa's
+/// llvmpipe, SwiftShader.
+pub fn is_software(backend: &str, adapter: &str) -> bool {
+    let b = backend.to_lowercase();
+    let a = adapter.to_lowercase();
+    b.contains("tiny-skia")
+        || ["basic render", "warp", "llvmpipe", "swiftshader", "software"]
+            .iter()
+            .any(|k| a.contains(k))
+}
+
+fn software() -> bool {
+    SOFTWARE.load(Ordering::Relaxed)
+}
 
 /// Seconds since the first animated frame; the phase of every animation.
 #[derive(Default)]
 pub struct Clock(f32);
 
 /// Advance on each redraw and book the next one.
-fn tick(clock: &mut Clock, event: &canvas::Event) -> Option<canvas::Action<Message>> {
+fn tick(clock: &mut Clock, event: &canvas::Event, frame: Duration) -> Option<canvas::Action<Message>> {
     match event {
         canvas::Event::Window(window::Event::RedrawRequested(now)) => {
             clock.0 = now.saturating_duration_since(*START).as_secs_f32();
-            Some(canvas::Action::request_redraw_at(*now + FRAME))
+            Some(canvas::Action::request_redraw_at(*now + frame))
         }
         _ => None,
     }
 }
 
-/* ---------- spinner ---------- */
+/* ---------- waiting dots ---------- */
 
-/// A small rotating arc, on a `bg` background.
-pub fn spinner<'a>(p: Pal, bg: Color) -> Element<'a, Message> {
-    canvas::Canvas::new(Spinner { color: p.cobalt, track: p.hairline, bg })
-        .width(16)
-        .height(16)
-        .into()
+/// One step of the dots: ".", "..", "...".
+const DOT_STEP: Duration = Duration::from_millis(400);
+
+/// "." → ".." → "..." on a `bg` background — the "still working" marker.
+/// Replaced a spinning arc, which cost a VM with no GPU most of its CPU.
+pub fn dots<'a>(color: Color, bg: Color) -> Element<'a, Message> {
+    canvas::Canvas::new(Dots { color, bg }).width(22).height(18).into()
 }
 
-struct Spinner {
+struct Dots {
     color: Color,
-    track: Color,
     bg: Color,
 }
 
-impl canvas::Program<Message> for Spinner {
+impl canvas::Program<Message> for Dots {
     type State = Clock;
 
     fn update(&self, clock: &mut Clock, event: &canvas::Event, _: Rectangle, _: mouse::Cursor) -> Option<canvas::Action<Message>> {
-        tick(clock, event)
+        tick(clock, event, DOT_STEP)
     }
 
     fn draw(&self, clock: &Clock, renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
         let mut f = Frame::new(renderer, bounds.size());
         f.fill_rectangle(Point::ORIGIN, bounds.size(), self.bg);
-        let c = f.center();
-        // stay inside the bounds: the renderer only repaints inside them
-        let r = bounds.width.min(bounds.height) / 2.0 - 2.5;
-        let ring = Path::circle(c, r);
-        f.stroke(&ring, Stroke::default().with_width(2.0).with_color(self.track));
-        let start = clock.0 * std::f32::consts::TAU * 1.2;
-        let arc = Path::new(|b| {
-            b.arc(Arc {
-                center: c,
-                radius: r,
-                start_angle: Radians(start),
-                end_angle: Radians(start + 1.6),
-            })
+        let n = (clock.0 / DOT_STEP.as_secs_f32()) as usize % 3 + 1;
+        f.fill_text(canvas::Text {
+            content: ".".repeat(n),
+            position: Point::new(1.0, bounds.height / 2.0),
+            color: self.color,
+            size: iced::Pixels(style::S_1),
+            font: style::BOLD,
+            align_y: iced::alignment::Vertical::Center,
+            ..Default::default()
         });
-        f.stroke(
-            &arc,
-            Stroke::default()
-                .with_width(2.0)
-                .with_color(self.color)
-                .with_line_cap(LineCap::Round),
-        );
         vec![f.into_geometry()]
     }
 }
@@ -159,7 +172,8 @@ impl canvas::Program<Message> for Cable {
     fn update(&self, clock: &mut Clock, event: &canvas::Event, _: Rectangle, _: mouse::Cursor) -> Option<canvas::Action<Message>> {
         // only the flowing wire moves
         if self.flowing {
-            tick(clock, event)
+            let frame = if software() { SOFTWARE_FRAME } else { FRAME };
+            tick(clock, event, frame)
         } else {
             None
         }

@@ -1,6 +1,6 @@
 [package]
 name = "winci"
-version = "1.0.1"
+version = "1.0.2"
 description = "WINCI — direct-cable PC data crossing"
 authors = ["you"]
 license = ""

@@ -377,6 +377,10 @@ impl App {
                     i.cpu_brand.trim(),
                     i.cpu_cores.map_or("?".into(), |c| c.to_string()),
                 );
+                if widgets::is_software(&i.graphics_backend, &i.graphics_adapter) {
+                    widgets::SOFTWARE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    log::info!("no hardware GPU — animations slowed to save CPU");
+                }
             }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 use keyboard::key::{Key, Named};
@@ -941,6 +945,15 @@ fn merge_picks(cur: &mut Vec<SourceGroup>, add: Vec<SourceGroup>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn software_renderers() {
+        assert!(widgets::is_software("tiny-skia", "CPU"));
+        assert!(widgets::is_software("Dx12", "Microsoft Basic Render Driver"));
+        assert!(widgets::is_software("Vulkan", "llvmpipe (LLVM 17.0.6, 256 bits)"));
+        assert!(!widgets::is_software("Dx12", "NVIDIA GeForce RTX 3060"));
+        assert!(!widgets::is_software("Vulkan", "Intel(R) Graphics (MTL)"));
+    }
 
     #[test]
     fn addr_parsing() {

@@ -2,7 +2,7 @@
 
 use super::format::{bytes, count, eta, rate};
 use super::style::{self, Btn, Pal, MONO};
-use super::widgets::{body, eyebrow, mono, panel_head, spinner, warn_line};
+use super::widgets::{body, dots, eyebrow, mono, panel_head, warn_line};
 use super::{
     App, BrowserAction, Fw, Message, PairMode, PairStatus, PickInto, Role, Step, TransferMode, CODE_INPUT,
 };
@@ -36,10 +36,10 @@ fn card<'a>(p: Pal, content: impl Into<Element<'a, Message>>) -> container::Cont
     container(content).padding([18, 20]).width(Fill).style(style::card(p))
 }
 
-/// Spinner (or a status dot) + a line of text, sitting on `bg`.
+/// Animated "..." (or a status dot) + a line of text, sitting on `bg`.
 fn waiting<'a>(app: &App, bg: iced::Color, busy: bool, dot: iced::Color, line: Element<'a, Message>) -> Element<'a, Message> {
     let lead: Element<_> = if busy {
-        spinner(app.pal(), bg)
+        dots(app.pal().cobalt, bg)
     } else {
         container(space().width(8).height(8)).style(style::tinted(dot, dot, 4.0)).into()
     };
