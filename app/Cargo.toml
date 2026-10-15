@@ -1,6 +1,6 @@
 [package]
 name = "winci"
-version = "1.1.1"
+version = "1.2.0"
 description = "WINCI — direct-cable PC data crossing"
 authors = ["you"]
 license = ""
@@ -31,6 +31,9 @@ log = "0.4"
 iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "sysinfo", "crisp", "web-colors", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "linux-theme-detection"] }
 # PNG only, for the logo + window icon (iced's "image" feature drags in every codec)
 image = { version = "0.25", default-features = false, features = ["png"] }
+# terminal UI for servers over SSH (`winci --tui`): keyboard + mouse, no
+# display needed. Its crossterm comes re-exported as ratatui::crossterm.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 # native Explorer open-folder / open-file dialogs
 rfd = "0.17"
 # local time for the log view's clock column

@@ -402,13 +402,18 @@ pub fn import_received(dump: &Path, base: Option<&Path>) -> ImportReport {
         ("Music", user_dir("Music", dirs::audio_dir())),
         ("Videos", user_dir("Videos", dirs::video_dir())),
     ];
-    // custom picks / unknown folders: Documents\<name>, or <base>\<name>
+    // custom picks / unknown folders: Documents\<name>, or <base>\<name>.
+    // No Documents (Linux servers without XDG user dirs): the home folder,
+    // never the directory WINCI happened to be started from.
     let (loose_root, loose_note) = match base {
-        Some(b) => (b.to_path_buf(), b.display().to_string()),
-        None => (
-            dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")),
-            "Documents".to_string(),
-        ),
+        Some(b) => (b.to_path_buf(), b.to_path_buf()),
+        None => match dirs::document_dir() {
+            Some(d) => (d, PathBuf::from("Documents")),
+            None => {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                (home.clone(), home)
+            }
+        },
     };
     let note = |target: &Path| base.map(|_| format!("→ {}", target.display()));
 
@@ -457,7 +462,7 @@ pub fn import_received(dump: &Path, base: Option<&Path>) -> ImportReport {
                     &c.path(),
                     &loose_root.join(&pick),
                     &pick,
-                    Some(format!("→ {loose_note}\\{pick}")),
+                    Some(format!("→ {}", loose_note.join(&pick).display())),
                     &mut log,
                 ));
             }
@@ -482,7 +487,7 @@ pub fn import_received(dump: &Path, base: Option<&Path>) -> ImportReport {
                     &p,
                     &target,
                     &name,
-                    Some(format!("→ {loose_note}\\{name}")),
+                    Some(format!("→ {}", loose_note.join(&name).display())),
                     &mut log,
                 ));
             }

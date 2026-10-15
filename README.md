@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 1.1.1**
+**Version 1.2.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -15,8 +15,10 @@ ways, your choice:
 Either way there's no cloud and no accounts — the data crosses directly,
 **end-to-end encrypted**.
 
-One native Rust program: the transfer core plus a UI drawn with **iced**. No
-WebView2 and no browser engine. It draws on the GPU (DX12/Vulkan) and falls back
+One native Rust program: the transfer core plus a UI drawn with **iced** — or,
+on a server over SSH, the same flow as a **terminal UI** you drive with the
+keyboard or the mouse (see [Linux server over SSH](#linux-server-over-ssh--terminal-ui)).
+No WebView2 and no browser engine. It draws on the GPU (DX12/Vulkan) and falls back
 to a CPU renderer by itself when there's no usable GPU (Windows Server, bare
 VMs), so it starts everywhere. The log's first lines say which renderer a PC
 used (`renderer: …`); set `ICED_BACKEND=tiny-skia` to force the CPU one.
@@ -121,6 +123,13 @@ app/                     the whole program (one crate, one exe: winci.exe)
   src/ui/logview.rs      activity-log drawer
   src/ui/style.rs        "Signal Bench" palette + widget styles (light & dark)
   src/ui/widgets.rs      text helpers, animated cable, spinner
+  src/tui/mod.rs         terminal UI (--tui / SSH): terminal setup, event loop, panic safety
+  src/tui/app.rs         its state, messages + update (the same step flow) and key/mouse routing
+  src/tui/screens.rs     one fn per step, the terminal versions of ui/steps.rs
+  src/tui/view.rs        the frame: top bar, step rail, scrolling body, log panel, modals
+  src/tui/kit.rs         layout builder + hit map (every button reachable by click and Tab)
+  src/tui/picker.rs      the in-terminal file browser (replaces Explorer's pickers)
+  src/tui/input.rs       single-line text fields
 archive/react-ui/        the retired React/TypeScript UI (<= 0.8), kept for reference
 ```
 
@@ -184,6 +193,48 @@ downloads into `app/target/appimage/` on first run.
 - WINCI is built for Windows PCs: on Linux the firewall button does nothing and
   the "User Transfer" folders and browser paths are Windows-oriented. Sending
   or receiving plain folders and Custom Transfer picks works.
+- The same AppImage runs the terminal UI on a server — see below.
+
+### Linux server over SSH — terminal UI
+
+The same `winci` binary has a terminal UI with the whole flow — Send and
+Receive, pairing by cable or IP, User / Custom Transfer, the speed test, Stop,
+Import into place and the activity log. It pairs with the window on the other
+PC; the wire protocol is the same.
+
+```bash
+ssh me@server
+./WINCI-1.2.0-x86_64.AppImage --appimage-extract-and-run   # no FUSE on most servers
+# or a plain binary: winci
+```
+
+- **Which UI opens** — with no flag, the terminal UI when WINCI is started from
+  a terminal over SSH (`SSH_CONNECTION` / `SSH_TTY`, X forwarding included) or
+  with no display (`DISPLAY` and `WAYLAND_DISPLAY` unset), the window otherwise.
+  `--tui` / `--gui` force one; `--help` lists the flags. A desktop launcher
+  always gets the window.
+- **Keyboard** — Tab / Shift+Tab or ↑↓ move between buttons, rows and fields;
+  Enter or Space presses; PgUp / PgDn / Home / End scroll; Ctrl+L opens the log
+  panel; Esc closes it (or a dialog); `q` or Ctrl+C quits — asking first if a
+  pairing, transfer or import would be cut off. On the pair step, digits go
+  straight into the code.
+- **Mouse** — click anything, scroll with the wheel. Works over SSH in any
+  terminal with xterm mouse reporting (practically all). Hold **Shift** to
+  select text the usual way, e.g. to copy the code or an IP.
+- **Picking files and folders** — there's no Explorer over SSH, so pickers open
+  an in-terminal browser: ↑↓ / click to move, Enter / → / double-click to open a
+  folder, ← / Backspace to go up, Space or a click on `[ ]` to mark, `/` to
+  type a path (Tab completes it, `~` works), `.` shows hidden files.
+- **Logs** — the panel has the same level and filter as the window. **Copy**
+  puts the shown lines on *your* clipboard through the terminal (OSC 52; in
+  tmux set `set -g set-clipboard on`). The log file is in
+  `~/.local/share/com.winc.app/logs/winc.log`.
+- **Terminals** — 80×24 and up. A non-UTF-8 locale (`LANG=C`) switches to
+  plain ASCII; `NO_COLOR=1` drops colours.
+- **Long transfers** — if the SSH session drops, WINCI goes with it. Run it in
+  `tmux` or `screen` to survive a disconnect.
+- **No XDG folders** — on servers without a Documents folder, crossings land in
+  (and custom picks import into) the home folder.
 
 ### Tests
 
@@ -254,7 +305,19 @@ still shows how things got there.
 
 ## Version notes
 
-**1.1.1** (current)
+**1.2.0** (current)
+- **Terminal UI for Linux servers over SSH** — the whole send / receive flow
+  in a terminal, driven by keyboard *or* mouse. Starts by itself over SSH or
+  with no display; `--tui` / `--gui` choose. In-terminal file browser with Tab
+  completion instead of Explorer's pickers, log panel with OSC 52 copy, ASCII
+  fallback for non-UTF-8 locales, safe terminal restore on exit or a crash.
+  Same backend and wire protocol (`WINC4`): a TUI pairs with the window.
+- New command-line flags: `--tui`, `--gui`, `--version`, `--help`.
+- With no Documents folder (headless Linux), the default drop folder and
+  custom-pick imports use the home folder instead of the directory WINCI was
+  started from. Import notes show the platform's path separator.
+
+**1.1.1**
 - Diagnosing "data arrived damaged": when a frame fails its integrity check,
   the receiver now tests it against nearby file/chunk positions and logs
   either *"belongs to file #N chunk #M … the PCs disagree about frame order"*

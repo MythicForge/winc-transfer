@@ -2,8 +2,8 @@
 //! update — the old Leptos store + per-step signals + SessionController
 //! folded together.
 
-mod format;
-mod logview;
+pub mod format;
+pub mod logview;
 mod shell;
 mod steps;
 mod style;
@@ -468,13 +468,7 @@ impl App {
                         ),
                     );
                     self.pair_status = PairStatus::Error;
-                    let lower = e.to_lowercase();
-                    self.pair_err = if lower.contains("wrong code") || lower.contains("mismatch") {
-                        "That code didn’t match. Re-read it on the new PC."
-                    } else {
-                        "Couldn’t reach that PC. Check the IP, that WINCI is receiving, and the firewall."
-                    }
-                    .into();
+                    self.pair_err = pair_error_text(&e).into();
                 }
             },
 
@@ -882,7 +876,17 @@ impl App {
     }
 }
 
-fn idle_progress() -> TransferProgress {
+/// What the pair step tells the user when pairing fails (shared with the TUI).
+pub(crate) fn pair_error_text(e: &str) -> &'static str {
+    let lower = e.to_lowercase();
+    if lower.contains("wrong code") || lower.contains("mismatch") {
+        "That code didn’t match. Re-read it on the new PC."
+    } else {
+        "Couldn’t reach that PC. Check the IP, that WINCI is receiving, and the firewall."
+    }
+}
+
+pub(crate) fn idle_progress() -> TransferProgress {
     TransferProgress {
         state: "idle".into(),
         bytes_sent: 0,
@@ -942,7 +946,7 @@ fn inside(child: &str, parent: &str) -> bool {
 /// Add explorer picks without sending anything twice: skip exact repeats and
 /// anything already covered by a picked folder; a new folder swallows earlier
 /// picks that live inside it.
-fn merge_picks(cur: &mut Vec<SourceGroup>, add: Vec<SourceGroup>) {
+pub(crate) fn merge_picks(cur: &mut Vec<SourceGroup>, add: Vec<SourceGroup>) {
     for p in add {
         let path = p.path.clone().unwrap_or_default();
         let covered = cur.iter().any(|o| {
