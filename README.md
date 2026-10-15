@@ -131,6 +131,7 @@ app/                     the whole program (one crate, one exe: winci.exe)
   src/tui/picker.rs      the in-terminal file browser (replaces Explorer's pickers)
   src/tui/input.rs       single-line text fields
 archive/react-ui/        the retired React/TypeScript UI (<= 0.8), kept for reference
+run.sh                   Linux: build (release, if changed) + run from this checkout
 ```
 
 ---
@@ -207,6 +208,40 @@ ssh me@server
 ./WINCI-1.2.0-x86_64.AppImage --appimage-extract-and-run   # no FUSE on most servers
 # or a plain binary: winci
 ```
+
+**Straight from the source** — if the repo is on the machine, there's no need
+for the AppImage. Prerequisites are the same as for the Linux build above
+(Rust 1.88+ via <https://rustup.rs>, `sudo apt install build-essential`):
+
+```bash
+cd winc-UI
+./run.sh                         # builds if the source changed, then runs (release)
+./run.sh --tui                   # any WINCI flag passes straight through
+```
+
+`run.sh` loads `~/.cargo/env` itself if an SSH shell didn't, and says what's
+missing if Rust or a C compiler isn't installed. Or do the same by hand:
+
+```bash
+cd winc-UI/app
+
+cargo run --release -- --tui     # build + run in one go (args after `--` go to WINCI)
+
+# or build once, then run the binary directly
+cargo build --release            # -> target/release/winci
+./target/release/winci --tui
+
+# or install it as `winci` on your PATH (~/.cargo/bin)
+cargo install --path .
+winci
+```
+
+- Over SSH `--tui` is optional — it's picked automatically (see below).
+- **Always use `--release` for real transfers.** The release build links with
+  full LTO, so the first build takes a few minutes. A debug build (`cargo run`
+  without `--release`) compiles faster but encrypts at only a few tens of
+  MB/s: the link speed test and every crossing crawl. That's fine for UI work,
+  not for moving data. Both PCs count — the slower side sets the pace.
 
 - **Which UI opens** — with no flag, the terminal UI when WINCI is started from
   a terminal over SSH (`SSH_CONNECTION` / `SSH_TTY`, X forwarding included) or
