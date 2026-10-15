@@ -38,8 +38,13 @@ pub fn save(s: &Settings) {
     }
 }
 
+/// Documents — or the home folder on machines with no XDG user dirs (most
+/// Linux servers), so crossings never land in whatever directory WINCI was
+/// started from.
 pub fn default_receive_root() -> PathBuf {
-    dirs::document_dir().unwrap_or_else(|| PathBuf::from("."))
+    dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Where crossings land: the saved root if it still exists, else Documents.

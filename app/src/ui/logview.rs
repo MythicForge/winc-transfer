@@ -34,10 +34,15 @@ fn rank(level: &str) -> u8 {
 
 /// Rows passing the level floor and the text filter, newest last.
 pub fn shown(app: &App) -> Vec<&LogEntry> {
-    let q = app.log_filter.trim().to_lowercase();
-    let floor = rank(app.log_floor);
-    let hits: Vec<&LogEntry> = app
-        .log_rows
+    filter(&app.log_rows, app.log_floor, &app.log_filter)
+}
+
+/// The rows a log view shows for this level floor and filter text (shared
+/// with the TUI).
+pub fn filter<'a>(rows: &'a [LogEntry], floor: &str, filter: &str) -> Vec<&'a LogEntry> {
+    let q = filter.trim().to_lowercase();
+    let floor = rank(floor);
+    let hits: Vec<&LogEntry> = rows
         .iter()
         .filter(|e| {
             rank(&e.level) <= floor
