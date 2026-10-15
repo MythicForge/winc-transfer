@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 1.1.0**
+**Version 1.1.1**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -254,7 +254,15 @@ still shows how things got there.
 
 ## Version notes
 
-**1.1.0** (current)
+**1.1.1** (current)
+- Diagnosing "data arrived damaged": when a frame fails its integrity check,
+  the receiver now tests it against nearby file/chunk positions and logs
+  either *"belongs to file #N chunk #M … the PCs disagree about frame order"*
+  (a bug in WINCI) or *"matches no nearby position: its bytes were altered in
+  transit"* (the network path).
+- New test: 15k small files over a choppy, paused link.
+
+**1.1.0**
 - Linux AppImage build: `app/installer/appimage.sh`; README build steps for
   both platforms.
 - The Done page shows how long the transfer took and the average speed

@@ -1125,10 +1125,13 @@ fn write_files(
         let mut chunk = 0u64;
         loop {
             let Ok(mut body) = rx.recv() else { return };
+            let sealed = body.clone();
             if opener.open(idx as u32, chunk, &mut body).is_err() {
                 log::error!(
-                    "integrity check failed on chunk #{chunk} of '{}' — data was altered in transit",
-                    entry.rel
+                    "integrity check failed on chunk #{chunk} of '{}' ({} byte frame) — {}",
+                    entry.rel,
+                    sealed.len(),
+                    diagnose(opener, idx, chunk, &sealed)
                 );
                 return record(WriterErr::Damaged(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1154,6 +1157,29 @@ fn write_files(
         }
         done[idx].store(true, Ordering::Relaxed);
     }
+}
+
+/// Why didn't frame (`idx`, `chunk`) open? Try it at nearby positions: if it
+/// opens at another one, the two sides disagree about frame order (a bug
+/// here); if it opens nowhere, its bytes changed on the way (the network).
+/// Only runs on a failure, so the extra decrypts cost nothing normally.
+fn diagnose(opener: &Opener, idx: usize, chunk: u64, sealed: &[u8]) -> String {
+    let lo = idx.saturating_sub(64);
+    for f in lo..idx + 64 {
+        for c in chunk.saturating_sub(4)..chunk + 4 {
+            if (f, c) == (idx, chunk) {
+                continue;
+            }
+            let mut b = sealed.to_vec();
+            if opener.open(f as u32, c, &mut b).is_ok() {
+                return format!(
+                    "it is intact but belongs to file #{f} chunk #{c} (expected #{idx} chunk #{chunk}): \
+                     the PCs disagree about frame order"
+                );
+            }
+        }
+    }
+    "it matches no nearby position: its bytes were altered in transit".into()
 }
 
 #[cfg(test)]
@@ -1198,6 +1224,9 @@ mod tests {
         FlipAt(usize),
         /// cut the connection this far in
         CloseAt(usize),
+        /// forward in small random pieces with short pauses, like a real
+        /// network rather than loopback's one big copy
+        Choppy,
     }
 
     /// Loopback TCP proxy in front of the receiver; connection `n` (0 = the
@@ -1219,6 +1248,7 @@ mod tests {
                     let (mut from, mut to) = (c, up);
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut seen = 0usize;
+                    let mut rng = 0x2545_F491_4F6C_DD1Du64;
                     loop {
                         let n = match from.read(&mut buf) {
                             Ok(0) | Err(_) => break,
@@ -1230,6 +1260,23 @@ mod tests {
                             _ => {}
                         }
                         seen += n;
+                        if let Fault::Choppy = fault {
+                            let mut at = 0;
+                            while at < n {
+                                rng ^= rng << 13;
+                                rng ^= rng >> 7;
+                                rng ^= rng << 17;
+                                let step = (1 + rng as usize % 3000).min(n - at);
+                                if to.write_all(&buf[at..at + step]).is_err() {
+                                    return;
+                                }
+                                at += step;
+                                if rng % 64 == 0 {
+                                    std::thread::sleep(Duration::from_micros(300));
+                                }
+                            }
+                            continue;
+                        }
                         if to.write_all(&buf[..n]).is_err() {
                             break;
                         }
@@ -1409,6 +1456,23 @@ mod tests {
         let e = sent.expect_err("sender should report the stop");
         assert!(e.to_string().contains("stopped on the new PC"), "{e}");
         assert!(t.elapsed() < Duration::from_secs(15), "took {:?}", t.elapsed());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Lots of small files over a link that delivers in odd-sized pieces with
+    /// pauses — the field case (a web app's image cache over a LAN) that
+    /// loopback's big smooth copies never exercised.
+    #[test]
+    fn many_small_files_over_choppy_link() {
+        let (root, items) = make_files("choppy", 15_000, |i| match i % 20 {
+            0 => 0,
+            1 => 300_000 + i % 1000,
+            _ => 100 + (i * 7919) % 40_000,
+        });
+        let (sent, got, dest) = run("choppy", &items, &root, |p| proxy(p, |_| Fault::Choppy), 0);
+        sent.unwrap();
+        got.unwrap();
+        assert_same(&items, &dest);
         std::fs::remove_dir_all(&root).ok();
     }
 
