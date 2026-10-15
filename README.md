@@ -101,7 +101,8 @@ Source of truth for the wire protocol: `app/src/model.rs`, `net.rs`, and
 ```
 app/                     the whole program (one crate, one exe: winci.exe)
   build.rs               embeds the exe icon + version info (Windows)
-  installer/winci.iss    Inno Setup script (Program Files + Start menu + uninstall)
+  installer/winci.iss    Windows installer (Inno Setup: Program Files + Start menu + uninstall)
+  installer/appimage.sh  Linux AppImage build (+ winci.desktop)
   assets/, icons/        logo + icons
   src/main.rs            entry: start the log bus, run the UI
   src/backend.rs         everything the UI asks for (pair, send, receive, import…)
@@ -127,36 +128,72 @@ archive/react-ui/        the retired React/TypeScript UI (<= 0.8), kept for refe
 
 ## Build & run
 
-### Prerequisites (on the Windows dev machine)
+Everything builds from `app/`. The version lives in one place,
+`app/Cargo.toml`; the exe, the window title and both packages read it from
+there.
+
+### Windows — exe and installer
+
+**Prerequisites**
 - **Rust** (stable, 1.88+) via <https://rustup.rs>
-- **Microsoft C++ Build Tools** (MSVC + Windows SDK — `rc.exe` embeds the icon)
+- **Microsoft C++ Build Tools** (MSVC + Windows SDK — `rc.exe` embeds the exe
+  icon and version info)
+- **Inno Setup 6** (<https://jrsoftware.org/isinfo.php>) — only for the
+  installer; add its folder to `PATH` for `iscc`
 
 ```powershell
 cd app
 
-# run (debug)
-cargo run
-
-# release exe -> app\target\release\winci.exe
-cargo build --release
+cargo run                    # debug run
+cargo build --release        # -> target\release\winci.exe
+iscc installer\winci.iss     # -> target\installer\WINCI-<version>-setup.exe
 ```
 
-`winci.exe` is the whole app — copy it anywhere and run it; nothing else to
-install. For a Program Files install with a Start-menu entry and uninstaller,
-build the installer with [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+- `winci.exe` alone is the whole app: copy it anywhere and run it.
+- The installer puts it in Program Files with a Start-menu entry, an optional
+  desktop shortcut and an uninstaller (which also removes WINCI's firewall
+  rule). It needs admin rights.
+- Uninstall the old Tauri-based WINCI (≤ 0.12) first — it's a separate entry
+  in Apps & features.
+- Release builds use full link-time optimisation for transfer speed, so the
+  final link takes a few minutes.
 
-```powershell
-iscc installer\winci.iss   # -> app\target\installer\WINCI-<version>-setup.exe
+### Linux — AppImage
+
+**Prerequisites**
+- **Rust** (stable, 1.88+) via <https://rustup.rs>
+- A C toolchain and `curl` (`sudo apt install build-essential curl`)
+
+```bash
+app/installer/appimage.sh    # -> app/target/appimage/WINCI-<version>-x86_64.AppImage
 ```
 
-Uninstall the old Tauri-based WINCI (≤ 0.12) first — it's a separate entry in
-Apps & features. Release builds use full link-time optimisation for transfer speed, so
-the final link takes a few minutes.
+The script builds the release binary, lays out the AppDir (binary,
+`installer/winci.desktop`, icon) and packs it with `appimagetool`, which it
+downloads into `app/target/appimage/` on first run.
 
-> Written on Linux, where it also builds and runs (`cargo run` in `app/`), but
-> **real testing happens on Windows** — that's the only place the
-> Thunderbolt/USB4 adapter and browser paths exist. `cargo test --release`
-> runs the transfer tests (pairing, resume, damage, stop) over loopback.
+- **Build on the oldest distro you want to support** (e.g. Ubuntu 22.04, or a
+  container of it). An AppImage only runs where the system glibc is at least
+  as new as the build machine's.
+- Run it with `chmod +x WINCI-*.AppImage && ./WINCI-*.AppImage`. Systems
+  without FUSE 2 need `sudo apt install libfuse2`, or run it with
+  `--appimage-extract-and-run`.
+- Graphics libraries come from the system; with no Vulkan driver it falls back
+  to the CPU renderer. The folder pickers need a desktop portal (GNOME and KDE
+  run one).
+- WINCI is built for Windows PCs: on Linux the firewall button does nothing and
+  the "User Transfer" folders and browser paths are Windows-oriented. Sending
+  or receiving plain folders and Custom Transfer picks works.
+
+### Tests
+
+```bash
+cd app && cargo test --release   # pairing, resume, damage, stop — over loopback
+```
+
+> Written on Linux, where it also builds and runs, but **real testing happens
+> on Windows** — that's the only place the Thunderbolt/USB4 adapter and
+> browser paths exist.
 
 ---
 
@@ -218,6 +255,8 @@ still shows how things got there.
 ## Version notes
 
 **1.1.0** (current)
+- Linux AppImage build: `app/installer/appimage.sh`; README build steps for
+  both platforms.
 - The Done page shows how long the transfer took and the average speed
   ("Took 3m 05s · average 412 MB/s"), and the log records it. Timed from
   *Start transfer* (receiver: the sender connecting) to the last file.

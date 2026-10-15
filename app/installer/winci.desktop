@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=WINCI
+GenericName=PC Data Transfer
+Comment=Move files and browser data between two PCs over a cable or network
+Exec=winci
+Icon=winci
+Terminal=false
+Categories=Utility;Network;FileTransfer;
