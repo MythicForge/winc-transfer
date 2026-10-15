@@ -1,0 +1,244 @@
+//! Encrypted transport: SPAKE2 (pairing code -> strong session key) + per-direction
+//! ChaCha20-Poly1305 frames. The code itself is never sent on the wire — a
+//! successful decrypt of the first frame is the proof both sides knew it.
+
+use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
+use hkdf::Hkdf;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use sha2::Sha256;
+use spake2::{Ed25519Group, Identity, Password, Spake2};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+/// Hard cap on one frame — a manifest for a very large tree can run to
+/// megabytes; anything bigger than this is garbage or an attack, not data.
+const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// AEAD tag length: an empty-plaintext frame is exactly this long on the wire,
+/// so a reader can spot an end-of-file marker without decrypting it.
+pub const TAG_LEN: usize = 16;
+/// SPAKE2 messages are ~33 bytes; anything near this cap is not a peer.
+const MAX_HANDSHAKE_MSG: usize = 1024;
+
+/// Run the SPAKE2 handshake over a fresh TCP connection and return the
+/// encrypted framing layer. Both sides call this (symmetric PAKE); `initiator`
+/// only decides which derived key encrypts which direction.
+pub fn pake_handshake(stream: &TcpStream, code: &str, initiator: bool) -> io::Result<EncryptedStream> {
+    // Bound the handshake so a stalled or hostile peer (or a firewall that
+    // allows the SYN but drops data) can't hang the UI forever.
+    let prev_timeout = stream.read_timeout()?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+    let (state, outbound) = Spake2::<Ed25519Group>::start_symmetric(
+        &Password::new(code.as_bytes()),
+        &Identity::new(b"winc-v1"),
+    );
+
+    let mut w = stream.try_clone()?;
+    let mut r = stream.try_clone()?;
+    w.write_all(&(outbound.len() as u32).to_be_bytes())?;
+    w.write_all(&outbound)?;
+    w.flush()?;
+
+    let mut lenb = [0u8; 4];
+    r.read_exact(&mut lenb)?;
+    let len = u32::from_be_bytes(lenb) as usize;
+    if len == 0 || len > MAX_HANDSHAKE_MSG {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad handshake"));
+    }
+    let mut inbound = vec![0u8; len];
+    r.read_exact(&mut inbound)?;
+
+    let shared = state
+        .finish(&inbound)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "handshake failed"))?;
+
+    // Split the shared key into one key per direction so the two counter-based
+    // nonce streams can never collide on the same key.
+    let hk = Hkdf::<Sha256>::new(None, &shared);
+    let mut a2b = [0u8; 32];
+    let mut b2a = [0u8; 32];
+    hk.expand(b"winc a2b", &mut a2b)
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "hkdf failed"))?;
+    hk.expand(b"winc b2a", &mut b2a)
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "hkdf failed"))?;
+    let (send_key, recv_key) = if initiator { (a2b, b2a) } else { (b2a, a2b) };
+
+    stream.set_read_timeout(prev_timeout)?;
+    Ok(EncryptedStream {
+        reader: BufReader::new(r),
+        writer: BufWriter::new(w),
+        send_cipher: ChaCha20Poly1305::new(Key::from_slice(&send_key)),
+        recv_cipher: ChaCha20Poly1305::new(Key::from_slice(&recv_key)),
+        send_n: 0,
+        recv_n: 0,
+    })
+}
+
+/// AEAD-framed transport over TCP. Frames are `[u32 len][ciphertext+tag]`;
+/// nonces are per-direction 64-bit counters, so a (key, nonce) pair is never
+/// reused. An empty plaintext is a valid frame (used as an end-of-file marker).
+pub struct EncryptedStream {
+    reader: BufReader<TcpStream>,
+    writer: BufWriter<TcpStream>,
+    send_cipher: ChaCha20Poly1305,
+    recv_cipher: ChaCha20Poly1305,
+    send_n: u64,
+    recv_n: u64,
+}
+
+fn nonce_for(counter: u64) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[4..].copy_from_slice(&counter.to_be_bytes());
+    n
+}
+
+/// File data has its own nonce space — `[1][file u32][chunk u56]` — so frames
+/// can be sealed and opened on worker threads in any order while the wire
+/// order stays fixed. Control frames (counter nonces) always have byte 0 = 0.
+/// A position can't repeat on one connection, and every connection (resumes
+/// included) has fresh SPAKE2 keys, so a (key, nonce) pair is never reused.
+/// Opening at the receiver's *expected* position also rejects reordered,
+/// dropped or replayed frames, exactly as the counter did.
+fn data_nonce(file: u32, chunk: u64) -> [u8; 12] {
+    debug_assert!(chunk < 1 << 56);
+    let mut n = [0u8; 12];
+    n[0] = 1;
+    n[1..5].copy_from_slice(&file.to_be_bytes());
+    n[5..].copy_from_slice(&chunk.to_be_bytes()[1..]);
+    n
+}
+
+/// Seals file-data frames; cheap to clone, one per worker thread.
+#[derive(Clone)]
+pub struct Sealer(ChaCha20Poly1305);
+
+impl Sealer {
+    /// `buf` holds 4 spare header bytes then the plaintext of chunk `chunk` of
+    /// file `file`; on return it is the wire frame `[len][ciphertext][tag]`.
+    pub fn seal(&self, file: u32, chunk: u64, buf: &mut Vec<u8>) -> io::Result<()> {
+        let tag = self
+            .0
+            .encrypt_in_place_detached(Nonce::from_slice(&data_nonce(file, chunk)), b"", &mut buf[4..])
+            .map_err(|_| io::Error::other("encrypt failed"))?;
+        buf.extend_from_slice(&tag);
+        let len = (buf.len() - 4) as u32;
+        buf[..4].copy_from_slice(&len.to_be_bytes());
+        Ok(())
+    }
+}
+
+/// Opens file-data frames; cheap to clone, one per worker thread.
+#[derive(Clone)]
+pub struct Opener(ChaCha20Poly1305);
+
+impl Opener {
+    /// `buf` is a frame body from `read_raw` (`[ciphertext][tag]`); on return
+    /// it is the plaintext. Fails (PermissionDenied) if it isn't chunk `chunk`
+    /// of file `file` exactly as sealed.
+    pub fn open(&self, file: u32, chunk: u64, buf: &mut Vec<u8>) -> io::Result<()> {
+        let split = buf.len().checked_sub(TAG_LEN).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "frame shorter than its tag")
+        })?;
+        let tag = Tag::clone_from_slice(&buf[split..]);
+        self.0
+            .decrypt_in_place_detached(Nonce::from_slice(&data_nonce(file, chunk)), b"", &mut buf[..split], &tag)
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "code mismatch"))?;
+        buf.truncate(split);
+        Ok(())
+    }
+}
+
+impl EncryptedStream {
+    pub fn write_frame(&mut self, plaintext: &[u8]) -> io::Result<()> {
+        let nonce = nonce_for(self.send_n);
+        self.send_n += 1;
+        let ct = self
+            .send_cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "encrypt failed"))?;
+        self.writer.write_all(&(ct.len() as u32).to_be_bytes())?;
+        self.writer.write_all(&ct)?;
+        Ok(())
+    }
+
+    /// A decrypt failure means the peer used a different code (or the data was
+    /// tampered with) — surfaced as `PermissionDenied` so callers can show a
+    /// clean "wrong code" instead of a byte-level error.
+    pub fn read_frame(&mut self) -> io::Result<Vec<u8>> {
+        let mut lenb = [0u8; 4];
+        self.reader.read_exact(&mut lenb)?;
+        let len = u32::from_be_bytes(lenb) as usize;
+        if len < 16 || len > MAX_FRAME {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad frame length"));
+        }
+        let mut ct = vec![0u8; len];
+        self.reader.read_exact(&mut ct)?;
+        let nonce = nonce_for(self.recv_n);
+        self.recv_n += 1;
+        self.recv_cipher
+            .decrypt(Nonce::from_slice(&nonce), ct.as_slice())
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "code mismatch"))
+    }
+
+    /// For file data: seal frames on any thread, then `write_raw` them in order.
+    pub fn sealer(&self) -> Sealer {
+        Sealer(self.send_cipher.clone())
+    }
+
+    /// For file data: `read_raw` frames in order, open them on any thread.
+    pub fn opener(&self) -> Opener {
+        Opener(self.recv_cipher.clone())
+    }
+
+    /// Put an already-sealed frame (from `Sealer::seal`) on the wire.
+    pub fn write_raw(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.writer.write_all(frame)
+    }
+
+    /// Next frame body, still sealed, into `buf` (reused across calls).
+    pub fn read_raw(&mut self, buf: &mut Vec<u8>) -> io::Result<()> {
+        let mut lenb = [0u8; 4];
+        self.reader.read_exact(&mut lenb)?;
+        let len = u32::from_be_bytes(lenb) as usize;
+        if !(TAG_LEN..=MAX_FRAME).contains(&len) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad frame length"));
+        }
+        buf.resize(len, 0);
+        self.reader.read_exact(buf)
+    }
+
+    /// Bound how long a write may block (None = forever) — so a sender whose
+    /// receiver vanished errors out (and resumes) instead of hanging.
+    pub fn set_write_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.writer.get_ref().set_write_timeout(d)
+    }
+
+    /// A second handle on the socket, so another thread can shut it down and
+    /// unblock a read or write stuck on a stalled peer.
+    pub fn socket(&self) -> io::Result<TcpStream> {
+        self.writer.get_ref().try_clone()
+    }
+
+    /// Bound how long a read may block (None = forever).
+    pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        self.reader.get_ref().set_read_timeout(d)
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+
+    pub fn write_json<T: Serialize>(&mut self, v: &T) -> io::Result<()> {
+        let bytes = serde_json::to_vec(v)?;
+        self.write_frame(&bytes)?;
+        self.flush()
+    }
+
+    pub fn read_json<T: DeserializeOwned>(&mut self) -> io::Result<T> {
+        let bytes = self.read_frame()?;
+        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
