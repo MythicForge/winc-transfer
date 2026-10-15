@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="ui/assets/WINCI.svg" alt="WINCI logo" width="180" />
+  <img src="app/assets/WINCI.svg" alt="WINCI logo" width="180" />
 </p>
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 0.11.0**
+**Version 1.0.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -15,15 +15,16 @@ ways, your choice:
 Either way there's no cloud and no accounts — the data crosses directly,
 **end-to-end encrypted**.
 
-Built with **Tauri v2** — Rust core + a Rust UI (**Leptos**, compiled to
-WebAssembly and rendered in the Tauri webview). Rust end to end.
+One native Rust program: the transfer core plus a UI drawn with **iced** on the
+CPU (tiny-skia). No WebView2, no browser engine, no GPU or OpenGL driver
+needed — it runs on Windows Server, VMs and over RDP the same as on a desktop.
 
 ## Branding
 
-- Logo: `ui/assets/WINCI.svg` (shown on the app's start screen and this page).
-- Icon pack: `ui/assets/WINCI.ico` (10 sizes, 16–256 px). Copies extracted into
-  `src-tauri/icons/` (`icon.ico`, `32x32.png`, `128x128.png`, `128x128@2x.png`,
-  `icon.png`) are what `npm run tauri build` bundles into the installer and exe.
+- Logo: `app/assets/WINCI.svg` (this page). The app's start screen and window
+  icon use `app/icons/128x128@2x.png` / `128x128.png`.
+- Icon pack: `app/assets/WINCI.ico` (10 sizes, 16–256 px) — `build.rs` embeds it
+  as the exe icon, along with the version info shown in Properties → Details.
 
 ---
 
@@ -64,9 +65,9 @@ The transfer protocol is identical on both paths:
   the PAKE shared secret). Always on — cable and network alike, no downgrade.
 - **Transfer** — length-declared manifest, then chunked file frames (an empty
   frame ends each file, so unreadable files skip cleanly mid-stream). Progress
-  is emitted to the UI (`winc://progress`) from whichever side is doing the I/O.
+  is pushed to the UI from whichever side is doing the I/O.
 
-Source of truth for the wire protocol: `src-tauri/src/model.rs`, `net.rs`, and
+Source of truth for the wire protocol: `app/src/model.rs`, `net.rs`, and
 `crypto.rs`; design rationale in `ENCRYPTION_PLAN.md`.
 
 ## What transfers
@@ -96,65 +97,64 @@ Source of truth for the wire protocol: `src-tauri/src/model.rs`, `net.rs`, and
 ## Project layout
 
 ```
-ui/                      Leptos UI (Rust -> wasm; the "Signal Bench" design)
-  index.html, Trunk.toml trunk entry + config (serves on :1420)
-  src/api/mod.rs         backend abstraction: real Tauri calls OR a browser mock
-  src/api/tauri.rs       raw bridge to window.__TAURI__ (invoke + events)
-  src/api/mock.rs        scripted mock backend for browser preview
-  src/types.rs,format.rs wire types + number formatting
-  src/store.rs           app state (role -> step), one signal per field
-  src/app.rs             app shell + step router
-  src/components/        cable visualization, rail, role picker, session controller,
-                         log panel/drawer/window (index.html?view=log)
-  src/log.rs             frontend end of the log bus
-  src/steps/             one file per wizard step
-  styles/                tokens.css - global.css - app.css - log.css
+app/                     the whole program (one crate, one exe: winci.exe)
+  build.rs               embeds the exe icon + version info (Windows)
+  installer/winci.iss    Inno Setup script (Program Files + Start menu + uninstall)
+  assets/, icons/        logo + icons
+  src/main.rs            entry: start the log bus, run the UI
+  src/backend.rs         everything the UI asks for (pair, send, receive, import…)
+                         + session state + the backend → UI event channel
+  src/logbus.rs          log fan-out: ring buffer + UI nudge + log file
+  src/model.rs           wire types + progress
+  src/net.rs             link detection, UDP discovery, TCP transfer
+  src/crypto.rs          SPAKE2 handshake + ChaCha20-Poly1305 framed transport
+  src/transfer.rs        pipelined file stream + auto-resume (+ its tests)
+  src/sources.rs         enumerate + expand folders / browser data
+  src/import.rs          receiver "Import into place": dump dir -> real folders/profiles
+  src/settings.rs        remembered drop / import folders
+  src/ui/mod.rs          app state, messages, update (the step flow)
+  src/ui/shell.rs        top bar, role picker, the cable, step rail
+  src/ui/steps.rs        one fn per wizard step
+  src/ui/logview.rs      activity-log drawer
+  src/ui/style.rs        "Signal Bench" palette + widget styles (light & dark)
+  src/ui/widgets.rs      text helpers, animated cable, spinner
 archive/react-ui/        the retired React/TypeScript UI (<= 0.8), kept for reference
-src-tauri/src/
-  logbus.rs              log fan-out: ring buffer + winc://log event + log file
-  model.rs               wire types + progress
-  net.rs                 link detection, UDP discovery, TCP transfer
-  crypto.rs              SPAKE2 handshake + ChaCha20-Poly1305 framed transport
-  sources.rs             enumerate + expand folders / browser data
-  import.rs              receiver "Import into place": dump dir -> real folders/profiles
-  commands.rs            #[tauri::command]s + session state
-  lib.rs                 app builder + handler registration
 ```
-
-### Mock mode
-Opened in a plain browser (no Tauri), `ui/src/api` falls back to a scripted mock so
-the whole flow is drivable — useful for design work on non-Windows machines. A
-"Demo mode" chip shows bottom-right. The real backend is used automatically
-inside the packaged app.
 
 ---
 
 ## Build & run
 
 ### Prerequisites (on the Windows dev machine)
-- **Node 18+** (only for the Tauri CLI)
-- **Rust** (stable) via <https://rustup.rs>, plus the wasm target and trunk:
-  `rustup target add wasm32-unknown-unknown` · `cargo install trunk --locked`
-- **Microsoft C++ Build Tools** (MSVC) + **WebView2** runtime (ships with Win 11)
+- **Rust** (stable, 1.88+) via <https://rustup.rs>
+- **Microsoft C++ Build Tools** (MSVC + Windows SDK — `rc.exe` embeds the icon)
 
 ```powershell
-npm install
+cd app
 
-# hot-reload dev (opens the native window)
-npm run tauri dev
+# run (debug)
+cargo run
 
-# release installer (.msi / .exe in src-tauri/target/release/bundle/)
-npm run tauri build
+# release exe -> app\target\release\winci.exe
+cargo build --release
 ```
 
-> The Rust core targets standard `std::net` + `if-addrs`/`walkdir`/`dirs`. It is
-> written on Linux but **must be compiled and tested on Windows** — that's the
-> only place the Thunderbolt/USB4 adapter and browser paths exist.
+`winci.exe` is the whole app — copy it anywhere and run it; nothing else to
+install. For a Program Files install with a Start-menu entry and uninstaller,
+build the installer with [Inno Setup 6](https://jrsoftware.org/isinfo.php):
 
-### UI-only preview (any OS)
-```bash
-cd ui && trunk serve   # http://localhost:1420  -> runs in mock mode
+```powershell
+iscc installer\winci.iss   # -> app\target\installer\WINCI-<version>-setup.exe
 ```
+
+Uninstall the old Tauri-based WINCI (≤ 0.12) first — it's a separate entry in
+Apps & features. Release builds use full link-time optimisation for transfer speed, so
+the final link takes a few minutes.
+
+> Written on Linux, where it also builds and runs (`cargo run` in `app/`), but
+> **real testing happens on Windows** — that's the only place the
+> Thunderbolt/USB4 adapter and browser paths exist. `cargo test --release`
+> runs the transfer tests (pairing, resume, damage, stop) over loopback.
 
 ---
 
@@ -197,17 +197,16 @@ Same pairing code, same encryption.
 ## Activity log
 
 Every step the app takes — adapter detection, beacon, pairing, each skipped
-file, every import decision — is logged. Open it with **Logs** in the title bar
-or **Ctrl+L** for an in-app drawer, or **Pop out ↗** for a separate window that
-can sit beside the main one during a transfer. Both views tail the same stream;
-the popout backfills from the in-memory ring buffer, so opening it mid-transfer
+file, every import decision — is logged. Open it with **Logs** in the top bar
+or **Ctrl+L** for a drawer at the bottom (**Expand** makes it taller, **Esc**
+closes it). It reads the in-memory ring buffer, so opening it mid-transfer
 still shows how things got there.
 
-- **Level** — Info by default. Debug adds per-command timing and per-adapter
-  detail; Trace names every file as it moves. Raising it here also raises it in
+- **Level** — Info by default. Debug adds per-adapter detail; Trace names
+  every file as it moves and every button press / input in the UI. Raising it here also raises it in
   the Rust backend, so those records actually get produced.
 - **Log file** — the same lines are appended to
-  `%APPDATA%\com.winc.app\logs\winc.log` (rotates at 5 MB, one older file kept),
+  `%LOCALAPPDATA%\com.winc.app\logs\winc.log` (rotates at 5 MB, one older file kept),
   and the button reveals it in Explorer for "send me the log".
 - Logging is **on in release builds**, not just debug — a fault on someone
   else's PC is the case that matters.
@@ -216,7 +215,26 @@ still shows how things got there.
 
 ## Version notes
 
-**0.11.0** (current)
+**1.0.0** (current)
+- **New native UI — no WebView2.** The Tauri + Leptos webview front end is gone;
+  the UI is now drawn by **iced** on the CPU, in the same program as the
+  transfer core. Fixes "Could not find the WebView2 Runtime" on Windows Server
+  and older/locked-down PCs; also needs no GPU/OpenGL driver.
+- Same flow and look (Signal Bench palette, live cable, step rail, light/dark
+  follows Windows). Differences: no drop shadows, the log drawer has
+  **Expand** instead of a pop-out window, and the cable reads
+  *Linked · network* when paired over Wi-Fi / Ethernet.
+- Ships as a single `winci.exe`; optional Inno Setup installer in
+  `app/installer/`. Settings and the log
+  file stay where earlier versions kept them.
+- Wire protocol unchanged (`WINC4`) — pairs with 0.12.x.
+
+**0.12.0**
+- Pipelined transfer engine (parallel encrypt/decrypt, 4 reader + 4 writer
+  threads, 1 MB frames, 4 MB socket buffers) and a **Test link speed** button.
+  Wire protocol `WINC4`.
+
+**0.11.0**
 - **Auto-resume** — if data arrives damaged (fails its integrity check) or the
   connection drops mid-transfer, the receiver keeps listening, the sender
   reconnects with the same pairing code, and the transfer picks up at the file

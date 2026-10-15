@@ -1,0 +1,64 @@
+[package]
+name = "winci"
+version = "1.0.0"
+description = "WINCI — direct-cable PC data crossing"
+authors = ["you"]
+license = ""
+edition = "2021"
+rust-version = "1.88"
+
+[[bin]]
+name = "winci"
+path = "src/main.rs"
+
+[build-dependencies]
+# exe icon + version info (the Properties → Details tab)
+winresource = "0.1"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+# the `log` facade only — records are fanned out by our own logbus.rs (ring
+# buffer + rotating file)
+log = "0.4"
+
+# native UI. CPU renderer only (tiny-skia): no WebView2, no GPU/OpenGL driver
+# needed, so it runs on servers, VMs and over RDP. Pinned exact — iced breaks
+# its API between minor versions.
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "crisp", "web-colors", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "linux-theme-detection"] }
+# PNG only, for the logo + window icon (iced's "image" feature drags in every codec)
+image = { version = "0.25", default-features = false, features = ["png"] }
+# native Explorer open-folder / open-file dialogs
+rfd = "0.17"
+# local time for the log view's clock column
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# transfer engine
+rand = "0.8"
+walkdir = "2.5"
+dirs = "5.0"
+if-addrs = "0.13"
+
+# encrypted transport (SPAKE2 + AEAD)
+spake2 = "0.4"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+# free disk space for the receiver's drop-folder pickers + pre-transfer check
+fs4 = "0.13"
+# socket send/receive buffer sizes (std doesn't expose them)
+socket2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+# adapter hardware descriptions (Thunderbolt/USB4 detection) — if-addrs only
+# exposes the friendly name ("Ethernet 3")
+ipconfig = "0.3"
+
+# transfer speed: whole-program optimisation for the crypto + copy hot loops
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[package.metadata.winresource]
+ProductName = "WINCI"
+FileDescription = "WINCI"
