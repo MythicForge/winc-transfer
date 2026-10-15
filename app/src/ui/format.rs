@@ -33,6 +33,18 @@ pub fn count(n: u64) -> String {
     out
 }
 
+/// 42 → "42s", 185 → "3m 05s", 3720 → "1h 02m"
+pub fn duration(secs: f64) -> String {
+    let s = secs.round() as u64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
 pub fn eta(bytes_left: f64, bps: f64) -> String {
     if bps <= 0.0 {
         return "—".into();
@@ -69,5 +81,8 @@ mod tests {
         assert_eq!(count(7), "7");
         assert_eq!(eta(0.0, 0.0), "—");
         assert_eq!(eta(90.0, 1.0), "1m 30s");
+        assert_eq!(duration(42.4), "42s");
+        assert_eq!(duration(185.0), "3m 05s");
+        assert_eq!(duration(3720.0), "1h 02m");
     }
 }

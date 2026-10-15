@@ -1,6 +1,6 @@
 //! The step screens, one fn each.
 
-use super::format::{bytes, count, eta, rate};
+use super::format::{bytes, count, duration, eta, rate};
 use super::style::{self, Btn, Pal, MONO};
 use super::widgets::{body, dots, eyebrow, mono, panel_head, warn_line};
 use super::{
@@ -36,7 +36,8 @@ fn card<'a>(p: Pal, content: impl Into<Element<'a, Message>>) -> container::Cont
     container(content).padding([18, 20]).width(Fill).style(style::card(p))
 }
 
-/// Animated "..." (or a status dot) + a line of text, sitting on `bg`.
+/// A status line: animated "..." while busy (where a spinner would be), a
+/// status dot once settled, then the text. The dots sit on `bg`.
 fn waiting<'a>(app: &App, bg: iced::Color, busy: bool, dot: iced::Color, line: Element<'a, Message>) -> Element<'a, Message> {
     let lead: Element<_> = if busy {
         dots(app.pal().cobalt, bg)
@@ -849,6 +850,23 @@ fn done(app: &App) -> Element<'_, Message> {
     let seal = container(text("✓").size(30).font(style::BOLD).style(style::color(iced::Color::WHITE)))
         .center(64)
         .style(style::tinted(p.good, p.good, 32.0));
+    // how long it took, and the average speed that works out to
+    let took: Element<_> = match app.transfer_took {
+        Some(t) => {
+            let secs = t.as_secs_f64().max(0.001);
+            mono(
+                format!(
+                    "Took {} · average {}",
+                    duration(secs),
+                    rate(g.bytes_total as f64 / secs)
+                ),
+                style::S_0,
+                p.ink,
+            )
+            .into()
+        }
+        None => space().into(),
+    };
     let hero = column![
         seal,
         text(if sending { "Everything sent" } else { "Everything landed" })
@@ -862,6 +880,7 @@ fn done(app: &App) -> Element<'_, Message> {
             ),
             p.ink_2
         ),
+        took,
     ]
     .spacing(10)
     .align_x(Alignment::Center);

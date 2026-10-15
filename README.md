@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 1.0.2**
+**Version 1.1.0**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -217,7 +217,12 @@ still shows how things got there.
 
 ## Version notes
 
-**1.0.2** (current)
+**1.1.0** (current)
+- The Done page shows how long the transfer took and the average speed
+  ("Took 3m 05s · average 412 MB/s"), and the log records it. Timed from
+  *Start transfer* (receiver: the sender connecting) to the last file.
+
+**1.0.2**
 - The spinner is gone: waiting lines show animated dots (".", "..", "...")
   stepping 2.5× a second. On a Hyper-V Server 2019 VM (no GPU) the spinner
   alone used ~80% CPU.

@@ -16,7 +16,7 @@ use crate::model::{AdapterInfo, LinkStatus, Peer, SourceGroup, TransferProgress,
 use iced::futures::StreamExt;
 use iced::widget::operation;
 use iced::{keyboard, time, window, Element, Subscription, Task, Theme};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn run() -> iced::Result {
     let icon = image::load_from_memory(include_bytes!("../../icons/128x128.png"))
@@ -214,6 +214,10 @@ pub struct App {
     pub speed: String,
     // transfer
     pub stopping: bool,
+    /// when the transfer step was entered (sender: Start transfer · receiver:
+    /// the sender connected), and how long it took once done
+    transfer_started: Option<Instant>,
+    pub transfer_took: Option<Duration>,
     last_state: String,
     // done
     pub report: Option<ImportReport>,
@@ -266,6 +270,8 @@ impl App {
             testing: false,
             speed: String::new(),
             stopping: false,
+            transfer_started: None,
+            transfer_took: None,
             last_state: "idle".into(),
             report: None,
             importing: false,
@@ -701,6 +707,9 @@ impl App {
         } else {
             Task::none()
         };
+        if step == Step::Transfer && self.step != Step::Transfer {
+            self.transfer_started = Some(Instant::now());
+        }
         self.step = step;
         top.chain(self.start(step))
     }
@@ -830,6 +839,14 @@ impl App {
                 }
                 self.progress = p;
                 if done {
+                    self.transfer_took = self.transfer_started.map(|t| t.elapsed());
+                    if let Some(took) = self.transfer_took {
+                        ui_log(
+                            "info",
+                            "ui::transfer",
+                            &format!("transfer took {}", format::duration(took.as_secs_f64())),
+                        );
+                    }
                     return self.go(Step::Done);
                 }
             }
