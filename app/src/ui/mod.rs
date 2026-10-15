@@ -16,7 +16,7 @@ use crate::model::{AdapterInfo, LinkStatus, Peer, SourceGroup, TransferProgress,
 use iced::futures::StreamExt;
 use iced::widget::operation;
 use iced::{keyboard, time, window, Element, Subscription, Task, Theme};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub fn run() -> iced::Result {
     let icon = image::load_from_memory(include_bytes!("../../icons/128x128.png"))
@@ -112,7 +112,7 @@ pub enum Message {
     ToggleLogs,
     Backend(Event),
     SystemTheme(iced::theme::Mode),
-    Frame(Instant),
+    SystemInfo(Box<iced::system::Information>),
     Key(keyboard::Event),
     // connect
     PollLink,
@@ -175,8 +175,6 @@ pub enum Message {
 
 pub struct App {
     dark: bool,
-    started: Instant,
-    now: Instant,
     /// Bumped on every Start over, so results from an abandoned session are dropped.
     gen: u64,
 
@@ -239,11 +237,8 @@ pub struct App {
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
-        let now = Instant::now();
         let app = App {
             dark: false,
-            started: now,
-            now,
             gen: 0,
             role: None,
             step: Step::Connect,
@@ -288,7 +283,11 @@ impl App {
             log_copied: false,
             errors_seen: 0,
         };
-        (app, iced::system::theme().map(Message::SystemTheme))
+        let boot = Task::batch([
+            iced::system::theme().map(Message::SystemTheme),
+            iced::system::information().map(|i| Message::SystemInfo(Box::new(i))),
+        ]);
+        (app, boot)
     }
 
     pub fn pal(&self) -> style::Pal {
@@ -303,11 +302,6 @@ impl App {
         style::theme(&self.pal(), self.dark)
     }
 
-    /// Seconds since start — drives the spinner and the cable pulses.
-    pub fn phase(&self) -> f32 {
-        self.now.duration_since(self.started).as_secs_f32()
-    }
-
     pub fn flowing(&self) -> bool {
         self.progress.state == "running"
     }
@@ -320,29 +314,12 @@ impl App {
             .count()
     }
 
-    /// Anything on screen moving? Only then run the frame clock.
-    fn animating(&self) -> bool {
-        if self.role.is_none() {
-            return false;
-        }
-        match self.step {
-            Step::Connect => !self.link.up,
-            Step::Pair => self.pair_status == PairStatus::Finding && self.pair_mode == PairMode::Auto,
-            Step::Code => true,
-            Step::Transfer => self.flowing() || self.progress.state == "reconnecting" || self.progress.state == "idle",
-            _ => false,
-        }
-    }
-
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             Subscription::run(backend_events),
             iced::system::theme_changes().map(Message::SystemTheme),
             keyboard::listen().map(Message::Key),
         ];
-        if self.animating() {
-            subs.push(time::every(Duration::from_millis(33)).map(Message::Frame));
-        }
         // APIPA (169.254) can take several seconds to self-assign after the
         // cable links, so poll — a one-shot check misses the cable and
         // latches onto Wi-Fi.
@@ -358,12 +335,12 @@ impl App {
     }
 
     fn update(&mut self, msg: Message) -> Task<Message> {
-        // every user action at Trace level (not the frame clock or backend
-        // pushes — those are logged where they're handled)
+        // every user action at Trace level (not backend pushes or polling —
+        // those are logged where they're handled)
         if !matches!(
             msg,
-            Message::Frame(_)
-                | Message::Backend(_)
+            Message::Backend(_)
+                | Message::SystemInfo(_)
                 | Message::Key(_)
                 | Message::PollLink
                 | Message::Link(_)
@@ -388,7 +365,19 @@ impl App {
             Message::GoTo(s) => return self.go(s),
             Message::ToggleLogs => self.toggle_logs(),
             Message::SystemTheme(mode) => self.dark = mode == iced::theme::Mode::Dark,
-            Message::Frame(t) => self.now = t,
+            Message::SystemInfo(i) => {
+                // which renderer this PC ended up on — the first thing to
+                // check when someone reports a slow or garbled window
+                log::info!(
+                    "renderer: {} ({}) · {} {} · {} × {} cores",
+                    i.graphics_backend,
+                    i.graphics_adapter,
+                    i.system_name.as_deref().unwrap_or("?"),
+                    i.system_version.as_deref().unwrap_or(""),
+                    i.cpu_brand.trim(),
+                    i.cpu_cores.map_or("?".into(), |c| c.to_string()),
+                );
+            }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 use keyboard::key::{Key, Named};
                 match key.as_ref() {
@@ -847,7 +836,7 @@ impl App {
     /// Reset the UI. The caller also stops the backend session (unblocks the
     /// receiver's accept loop, ends transfers, stops the beacon).
     fn reset(&mut self) {
-        let keep = (self.dark, self.started, self.now, self.gen);
+        let keep = (self.dark, self.gen);
         let logs = (
             self.logs_open,
             self.log_tall,
@@ -858,8 +847,8 @@ impl App {
             self.errors_seen,
         );
         *self = App::boot().0;
-        (self.dark, self.started, self.now) = (keep.0, keep.1, keep.2);
-        self.gen = keep.3 + 1;
+        self.dark = keep.0;
+        self.gen = keep.1 + 1;
         (
             self.logs_open,
             self.log_tall,

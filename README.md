@@ -4,7 +4,7 @@
 
 # WINCI — PC-to-PC Data Crossing
 
-**Version 1.0.0**
+**Version 1.0.1**
 
 Move files and browser data from an **old Windows PC** to a **new one** — two
 ways, your choice:
@@ -15,9 +15,11 @@ ways, your choice:
 Either way there's no cloud and no accounts — the data crosses directly,
 **end-to-end encrypted**.
 
-One native Rust program: the transfer core plus a UI drawn with **iced** on the
-CPU (tiny-skia). No WebView2, no browser engine, no GPU or OpenGL driver
-needed — it runs on Windows Server, VMs and over RDP the same as on a desktop.
+One native Rust program: the transfer core plus a UI drawn with **iced**. No
+WebView2 and no browser engine. It draws on the GPU (DX12/Vulkan) and falls back
+to a CPU renderer by itself when there's no usable GPU (Windows Server, bare
+VMs), so it starts everywhere. The log's first lines say which renderer a PC
+used (`renderer: …`); set `ICED_BACKEND=tiny-skia` to force the CPU one.
 
 ## Branding
 
@@ -215,7 +217,15 @@ still shows how things got there.
 
 ## Version notes
 
-**1.0.0** (current)
+**1.0.1** (current)
+- Smooth scrolling: draws on the GPU again (wgpu), keeping the CPU renderer
+  as the automatic fallback. CPU-only scrolling cost ~60 ms per step and lagged
+  on high-DPI screens.
+- The spinner and the cable animate on their own instead of redrawing the whole
+  window 30× a second, and no longer leave trails (the spinner's ring smear).
+- The log records the renderer, GPU, OS and CPU at startup.
+
+**1.0.0**
 - **New native UI — no WebView2.** The Tauri + Leptos webview front end is gone;
   the UI is now drawn by **iced** on the CPU, in the same program as the
   transfer core. Fixes "Could not find the WebView2 Runtime" on Windows Server

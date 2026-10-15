@@ -215,7 +215,6 @@ fn cable(app: &App) -> Element<'_, Message> {
             pal: p,
             linked,
             flowing,
-            phase: app.phase(),
         })
         .width(Fill)
         .height(96),

@@ -36,10 +36,10 @@ fn card<'a>(p: Pal, content: impl Into<Element<'a, Message>>) -> container::Cont
     container(content).padding([18, 20]).width(Fill).style(style::card(p))
 }
 
-/// Spinner (or a status dot) + a line of text.
-fn waiting<'a>(app: &App, busy: bool, dot: iced::Color, line: Element<'a, Message>) -> Element<'a, Message> {
+/// Spinner (or a status dot) + a line of text, sitting on `bg`.
+fn waiting<'a>(app: &App, bg: iced::Color, busy: bool, dot: iced::Color, line: Element<'a, Message>) -> Element<'a, Message> {
     let lead: Element<_> = if busy {
-        spinner(app.pal(), app.phase())
+        spinner(app.pal(), bg)
     } else {
         container(space().width(8).height(8)).style(style::tinted(dot, dot, 4.0)).into()
     };
@@ -66,9 +66,7 @@ fn connect(app: &App) -> Element<'_, Message> {
     let next = if app.role == Some(Role::Receive) { Step::Code } else { Step::Pair };
 
     let status: Element<_> = if l.up {
-        waiting(
-            app,
-            false,
+        waiting(app, p.panel, false,
             p.copper,
             body(
                 format!(
@@ -82,9 +80,7 @@ fn connect(app: &App) -> Element<'_, Message> {
         )
     } else if let Some(a) = &l.adapter {
         // cable adapter is up, but Windows hasn't assigned its IPv4 yet
-        waiting(
-            app,
-            true,
+        waiting(app, p.panel, true,
             p.slate,
             body(
                 format!(
@@ -96,9 +92,7 @@ fn connect(app: &App) -> Element<'_, Message> {
             .into(),
         )
     } else {
-        waiting(
-            app,
-            true,
+        waiting(app, p.panel, true,
             p.slate,
             body("Waiting for a direct cable link… (the address can take a few seconds)", p.ink).into(),
         )
@@ -258,16 +252,14 @@ fn pair(app: &App) -> Element<'_, Message> {
     let target: Element<_> = match app.pair_mode {
         PairMode::Auto => {
             let line: Element<_> = if app.pair_status == PairStatus::Finding {
-                waiting(app, true, p.slate, body("Looking for the new PC on the cable…", p.ink).into())
+                waiting(app, p.panel, true, p.slate, body("Looking for the new PC on the cable…", p.ink).into())
             } else if let Some(peer) = &app.peer {
-                waiting(
-                    app,
-                    false,
+                waiting(app, p.panel, false,
                     p.copper,
                     body(format!("Found {} at {}", peer.name, peer.ip), p.ink).into(),
                 )
             } else {
-                waiting(app, false, p.slate, body("No peer yet.", p.ink).into())
+                waiting(app, p.panel, false, p.slate, body("No peer yet.", p.ink).into())
             };
             card(p, line).padding(22).into()
         }
@@ -428,7 +420,7 @@ fn code(app: &App) -> Element<'_, Message> {
             ]
             .spacing(10)
         ),
-        waiting(app, true, p.slate, body("Listening for the old PC to connect…", p.ink).into()),
+        waiting(app, p.paper, true, p.slate, body("Listening for the old PC to connect…", p.ink).into()),
     ]
     .spacing(18)
     .into()
