@@ -322,8 +322,8 @@ pub async fn receive(app: AppHandle) -> Result<String, String> {
         let t = std::time::Instant::now();
         // The listener stays open for the whole transfer: if the link breaks,
         // the sender reconnects here with the same code and resumes.
-        let reaccept = |deadline| {
-            let (s, p) = net::accept_and_verify(&listener, &code, &cancel, Some(deadline))?;
+        let reaccept = |deadline: std::time::Instant, cancel: &AtomicBool| {
+            let (s, p) = net::accept_and_verify(&listener, &code, cancel, Some(deadline))?;
             log::info!("sender '{}' reconnected from {}", p.name, p.ip);
             Ok(s)
         };

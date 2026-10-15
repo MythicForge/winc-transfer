@@ -18,8 +18,10 @@ use crate::net::safe_join;
 use crate::sources::Item;
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const BUF: usize = 256 * 1024;
@@ -43,6 +45,12 @@ const FINISH_WAIT: Duration = Duration::from_secs(120);
 /// this long means the link is wedged (e.g. a damaged length header has it
 /// waiting for bytes that will never come) — treat it as broken and resume.
 const RECV_STALL: Duration = Duration::from_secs(90);
+/// Receiver, after Stop: how long to wait for the sender's reconnect to tell
+/// it so. It comes back within a second of the link closing.
+const STOP_NOTICE_WAIT: Duration = Duration::from_secs(6);
+/// Receiver, after giving up on a damaged link: same, but the sender may be
+/// mid-backoff, so allow longer.
+const GIVE_UP_NOTICE_WAIT: Duration = Duration::from_secs(20);
 
 fn is_cancel(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::Interrupted
@@ -106,19 +114,82 @@ enum SendFlow {
     Cancelled,
 }
 
+type Live = Mutex<Option<TcpStream>>;
+
+/// Run `body` alongside a watcher that shuts down the socket registered in
+/// `live` the moment `cancel` is set — so Stop lands even while a read or write
+/// is blocked on a stalled peer, instead of waiting out WRITE_STALL / RECV_STALL.
+fn with_cancel_watch<T>(cancel: &AtomicBool, body: impl FnOnce(&Live) -> T) -> T {
+    struct Done<'a>(&'a AtomicBool);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let live: Live = Mutex::new(None);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
+                    if let Some(s) = live.lock().unwrap().take() {
+                        let _ = s.shutdown(Shutdown::Both);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        // set even if `body` returns early or panics, so the watcher exits
+        let _done = Done(&done);
+        body(&live)
+    })
+}
+
+/// Point the cancel watcher at the connection now in use.
+fn watch(live: &Live, stream: &EncryptedStream) {
+    *live.lock().unwrap() = stream.socket().ok();
+}
+
+/// Close the connection for real. The watcher holds a second handle on the
+/// socket, so dropping `stream` alone would leave it open and the peer would
+/// never see the break.
+fn close(live: &Live, stream: EncryptedStream) {
+    if let Some(s) = live.lock().unwrap().take() {
+        let _ = s.shutdown(Shutdown::Both);
+    }
+    drop(stream);
+}
+
 /// Stream `items` over `stream`; on any link failure, get a new connection
 /// from `reconnect` and resume where the receiver says.
 pub fn send<F, R>(
-    mut stream: EncryptedStream,
+    stream: EncryptedStream,
     items: &[Item],
     cancel: &AtomicBool,
-    mut reconnect: R,
+    reconnect: R,
     emit: F,
 ) -> io::Result<()>
 where
     F: Fn(TransferProgress),
     R: FnMut() -> io::Result<EncryptedStream>,
 {
+    with_cancel_watch(cancel, |live| send_watched(stream, items, cancel, reconnect, emit, live))
+}
+
+fn send_watched<F, R>(
+    mut stream: EncryptedStream,
+    items: &[Item],
+    cancel: &AtomicBool,
+    mut reconnect: R,
+    emit: F,
+    live: &Live,
+) -> io::Result<()>
+where
+    F: Fn(TransferProgress),
+    R: FnMut() -> io::Result<EncryptedStream>,
+{
+    watch(live, &stream);
     let entries: Vec<FileEntry> = items
         .iter()
         .map(|i| FileEntry {
@@ -161,19 +232,26 @@ where
         match out {
             Ok(SendFlow::Done) => break,
             Ok(SendFlow::Cancelled) => {
-                log::warn!("send cancelled");
-                emit(TransferProgress::error("Cancelled"));
-                return Ok(());
+                close(live, stream);
+                return stop_sending(&mut reconnect, transfer_id, &emit);
+            }
+            // Stop was pressed — the error is the watcher closing the socket
+            // under a blocked write, not a break to resume
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                close(live, stream);
+                return stop_sending(&mut reconnect, transfer_id, &emit);
             }
             Err(e) => {
                 log::warn!("link to the receiver broke while sending: {e} — resuming");
-                let (s, at) = resume_sender(&mut reconnect, transfer_id, cancel, &emit, &offs, &budget)
-                    .inspect_err(|e| {
-                        if is_cancel(e) {
-                            emit(TransferProgress::error("Cancelled"));
-                        }
-                    })?;
+                close(live, stream);
+                let (s, at) = match resume_sender(&mut reconnect, transfer_id, cancel, &emit, &offs, &budget) {
+                    Ok(got) => got,
+                    // stopped while reconnecting: the receiver is still waiting for us
+                    Err(e) if is_cancel(&e) => return stop_sending(&mut reconnect, transfer_id, &emit),
+                    Err(e) => return Err(e),
+                };
                 budget.spend(at, &e)?;
+                watch(live, &s);
                 stream = s;
                 next = at;
                 log::info!("resumed at file #{at} of {total_files}");
@@ -245,6 +323,10 @@ fn send_from<F: Fn(TransferProgress)>(
                         break;
                     }
                 };
+                // per chunk, not per file: a multi-GB file must not hold up Stop
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(SendFlow::Cancelled);
+                }
                 stream.write_frame(&buf[..n])?;
                 sent += n as u64;
                 if last_emit.elapsed() >= Duration::from_millis(150) {
@@ -275,6 +357,25 @@ fn send_from<F: Fn(TransferProgress)>(
     }
     stream.flush()?;
     Ok(SendFlow::Done)
+}
+
+/// Stop pressed on this PC. The old link is already closed, so the receiver
+/// is about to wait for a resume — reconnect once and say it was a stop, so it
+/// ends now instead of waiting out RESUME_WINDOW.
+fn stop_sending<F, R>(reconnect: &mut R, transfer_id: u64, emit: &F) -> io::Result<()>
+where
+    F: Fn(TransferProgress),
+    R: FnMut() -> io::Result<EncryptedStream>,
+{
+    log::warn!("send cancelled — telling the receiver");
+    emit(TransferProgress::error("Cancelled"));
+    if let Err(e) = reconnect().and_then(|mut s| {
+        s.set_write_timeout(Some(Duration::from_secs(5)))?;
+        s.write_json(&Opening::Cancel { transfer_id })
+    }) {
+        log::warn!("could not tell the receiver about the stop: {e}");
+    }
+    Ok(())
 }
 
 /// The receiver confirms the last file landed intact.
@@ -344,6 +445,10 @@ where
             Ok((s, at))
         });
         match tried {
+            Ok((_, at)) if at.stopped => {
+                log::warn!("the receiver stopped the transfer");
+                return Err(io::Error::new(io::ErrorKind::Other, "the transfer was stopped on the new PC"));
+            }
             Ok((s, at)) if at.ok && at.next as usize <= total_files as usize => {
                 return Ok((s, at.next as usize))
             }
@@ -401,17 +506,33 @@ fn read_opening(stream: &mut EncryptedStream) -> io::Result<Opening> {
 }
 
 /// Receive a transfer into `dest`. On link failure, wait (via `reaccept`,
-/// given the deadline) for the sender to reconnect and resume.
+/// given the deadline and the flag that may interrupt it) for the sender to
+/// reconnect and resume.
 pub fn receive<F, A>(
+    stream: EncryptedStream,
+    dest: &Path,
+    cancel: &AtomicBool,
+    reaccept: A,
+    emit: F,
+) -> io::Result<()>
+where
+    F: Fn(TransferProgress),
+    A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
+{
+    with_cancel_watch(cancel, |live| receive_watched(stream, dest, cancel, reaccept, emit, live))
+}
+
+fn receive_watched<F, A>(
     mut stream: EncryptedStream,
     dest: &Path,
     cancel: &AtomicBool,
     mut reaccept: A,
     emit: F,
+    live: &Live,
 ) -> io::Result<()>
 where
     F: Fn(TransferProgress),
-    A: FnMut(Instant) -> io::Result<EncryptedStream>,
+    A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
 {
     let (transfer_id, total_bytes, total_files, chunks) = match read_opening(&mut stream)
         .inspect_err(|e| log::error!("could not read the manifest: {e}"))?
@@ -419,8 +540,8 @@ where
         Opening::Start { transfer_id, total_bytes, total_files, chunks } => {
             (transfer_id, total_bytes, total_files, chunks)
         }
-        Opening::Resume { .. } => {
-            log::error!("sender tried to resume a transfer this receiver never started");
+        Opening::Resume { .. } | Opening::Cancel { .. } => {
+            log::error!("sender referred to a transfer this receiver never started");
             return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected resume"));
         }
     };
@@ -454,21 +575,27 @@ where
     let start = Instant::now();
     let mut next = 0usize;
     let mut budget = ResumeBudget::new();
+    watch(live, &stream);
     loop {
         stream.set_read_timeout(Some(RECV_STALL))?;
         match recv_from(&mut stream, dest, &files, next, &offs, cancel, &emit, start) {
             Ok(RecvFlow::Done) => break,
             Ok(RecvFlow::Cancelled) => {
-                log::warn!("receive cancelled");
-                emit(TransferProgress::error("Cancelled"));
-                return Ok(());
+                close(live, stream);
+                return stop_receiving(&mut reaccept, transfer_id, &emit);
             }
             Err(RecvErr::Local(e)) => return Err(e),
+            // Stop was pressed — the error is the watcher closing the socket
+            // under a blocked read, not a break to wait out
+            Err(RecvErr::Link { .. }) if cancel.load(Ordering::Relaxed) => {
+                close(live, stream);
+                return stop_receiving(&mut reaccept, transfer_id, &emit);
+            }
             Err(RecvErr::Link { e, at }) => {
                 log::warn!("link to the sender broke at file #{at}: {e} — waiting for it to reconnect");
-                drop(stream); // the sender's next write fails fast and it starts reconnecting
+                close(live, stream); // the sender's next write fails fast and it starts reconnecting
                 if let Err(give_up) = budget.spend(at, &e) {
-                    refuse_one(&mut reaccept, transfer_id);
+                    refuse_one(&mut reaccept, transfer_id, GIVE_UP_NOTICE_WAIT, false);
                     return Err(give_up);
                 }
                 emit(TransferProgress::reconnecting(
@@ -478,11 +605,13 @@ where
                     total_files,
                     "Connection interrupted — waiting for the old PC to reconnect…",
                 ));
-                stream = resume_receiver(&mut reaccept, transfer_id, at).inspect_err(|e| {
-                    if is_cancel(e) {
-                        emit(TransferProgress::error("Cancelled"));
-                    }
-                })?;
+                stream = match resume_receiver(&mut reaccept, transfer_id, at, cancel) {
+                    Ok(s) => s,
+                    // stopped while waiting: the sender is still trying to get back
+                    Err(e) if is_cancel(&e) => return stop_receiving(&mut reaccept, transfer_id, &emit),
+                    Err(e) => return Err(e),
+                };
+                watch(live, &stream);
                 next = at;
                 log::info!("resumed at file #{at} of {total_files}");
             }
@@ -507,17 +636,35 @@ where
     Ok(())
 }
 
-/// After giving up, answer the sender's next reconnect with a refusal so it
-/// stops at once instead of retrying for the whole resume window.
-fn refuse_one<A>(reaccept: &mut A, transfer_id: u64)
+/// Stop pressed on this PC. The old link is already closed, so the sender is
+/// about to reconnect to resume — answer that with "stopped" so it ends now
+/// instead of retrying for RESUME_WINDOW.
+fn stop_receiving<F, A>(reaccept: &mut A, transfer_id: u64, emit: &F) -> io::Result<()>
 where
-    A: FnMut(Instant) -> io::Result<EncryptedStream>,
+    F: Fn(TransferProgress),
+    A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
 {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while let Ok(mut s) = reaccept(deadline) {
+    log::warn!("receive cancelled — telling the sender");
+    emit(TransferProgress::error("Cancelled"));
+    refuse_one(reaccept, transfer_id, STOP_NOTICE_WAIT, true);
+    Ok(())
+}
+
+/// Answer the sender's next reconnect with a refusal so it stops at once
+/// instead of retrying for the whole resume window. `stopped`: the user ended
+/// it here, as opposed to giving up on a damaged link.
+fn refuse_one<A>(reaccept: &mut A, transfer_id: u64, wait: Duration, stopped: bool)
+where
+    A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
+{
+    let deadline = Instant::now() + wait;
+    // a fresh flag: after Stop the session's own flag is set and would end
+    // the wait before the sender ever got its answer
+    let keep_waiting = AtomicBool::new(false);
+    while let Ok(mut s) = reaccept(deadline, &keep_waiting) {
         if let Ok(Opening::Resume { transfer_id: id }) = read_opening(&mut s) {
             if id == transfer_id {
-                let _ = s.write_json(&ResumeAt { ok: false, next: 0 });
+                let _ = s.write_json(&ResumeAt { ok: false, next: 0, stopped });
                 return;
             }
         }
@@ -526,13 +673,18 @@ where
 
 /// Wait for the sender to come back for `transfer_id` and tell it where to
 /// restart. Connections for anything else are turned away.
-fn resume_receiver<A>(reaccept: &mut A, transfer_id: u64, at: usize) -> io::Result<EncryptedStream>
+fn resume_receiver<A>(
+    reaccept: &mut A,
+    transfer_id: u64,
+    at: usize,
+    cancel: &AtomicBool,
+) -> io::Result<EncryptedStream>
 where
-    A: FnMut(Instant) -> io::Result<EncryptedStream>,
+    A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
 {
     let deadline = Instant::now() + RESUME_WINDOW;
     loop {
-        let mut s = match reaccept(deadline) {
+        let mut s = match reaccept(deadline, cancel) {
             Ok(s) => s,
             Err(e) if is_cancel(&e) || e.kind() == io::ErrorKind::TimedOut => {
                 if e.kind() == io::ErrorKind::TimedOut {
@@ -552,13 +704,18 @@ where
         };
         match read_opening(&mut s) {
             Ok(Opening::Resume { transfer_id: id }) if id == transfer_id => {
-                s.write_json(&ResumeAt { ok: true, next: at as u64 })?;
+                s.write_json(&ResumeAt { ok: true, next: at as u64, stopped: false })?;
                 return Ok(s);
+            }
+            Ok(Opening::Cancel { transfer_id: id }) if id == transfer_id => {
+                log::warn!("the sender stopped the transfer");
+                return Err(io::Error::new(io::ErrorKind::Other, "the transfer was stopped on the old PC"));
             }
             Ok(Opening::Resume { .. }) => {
                 log::warn!("a sender tried to resume a different transfer — refused");
-                let _ = s.write_json(&ResumeAt { ok: false, next: 0 });
+                let _ = s.write_json(&ResumeAt { ok: false, next: 0, stopped: false });
             }
+            Ok(Opening::Cancel { .. }) => log::warn!("a sender cancelled a different transfer — ignored"),
             Ok(Opening::Start { .. }) => {
                 log::warn!("a sender tried to start a new transfer mid-resume — refused");
             }
@@ -625,6 +782,9 @@ fn recv_from<F: Fn(TransferProgress)>(
             })?;
             if chunk.is_empty() {
                 break; // end of this file
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(RecvFlow::Cancelled);
             }
             out.write_all(&chunk).map_err(|e| {
                 log::error!("could not write {}: {e}", out_path.display());
@@ -750,7 +910,9 @@ mod tests {
         let (c2, d2) = (cancel.clone(), dest.clone());
         let rx = std::thread::spawn(move || {
             let (s, _) = accept_and_verify(&listener, CODE, &c2, None).unwrap();
-            let reaccept = |deadline| accept_and_verify(&listener, CODE, &c2, Some(deadline)).map(|(s, _)| s);
+            let reaccept = |deadline: Instant, c: &AtomicBool| {
+                accept_and_verify(&listener, CODE, c, Some(deadline)).map(|(s, _)| s)
+            };
             receive(s, &d2, &c2, reaccept, |_| {})
         });
         let peer = Peer { name: "t".into(), ip: "127.0.0.1".into(), port };
@@ -812,6 +974,64 @@ mod tests {
         assert!(got.is_err(), "receiver should give up");
         assert!(sent.is_err(), "sender should give up");
         assert!(t.elapsed() < Duration::from_secs(60), "took {:?}", t.elapsed());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Pair and transfer with a separate Stop flag per side; the side named by
+    /// `stop_sender` presses Stop as soon as data is flowing.
+    fn run_stopped(tag: &str, items: &[Item], root: &Path, stop_sender: bool) -> (io::Result<()>, io::Result<()>) {
+        let dest = root.join(format!("dest-{tag}"));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx_cancel, rx_cancel) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let rc = rx_cancel.clone();
+        let rx = std::thread::spawn(move || {
+            let (s, _) = accept_and_verify(&listener, CODE, &rc, None).unwrap();
+            let reaccept = |deadline: Instant, c: &AtomicBool| {
+                accept_and_verify(&listener, CODE, c, Some(deadline)).map(|(s, _)| s)
+            };
+            let stop = |_| {
+                if !stop_sender {
+                    rc.store(true, Ordering::Relaxed);
+                }
+            };
+            receive(s, &dest, &rc, reaccept, stop)
+        });
+        let peer = Peer { name: "t".into(), ip: "127.0.0.1".into(), port };
+        let s = connect_and_pair(&peer, "tester", CODE).unwrap();
+        let stop = |_| {
+            if stop_sender {
+                tx_cancel.store(true, Ordering::Relaxed);
+            }
+        };
+        let sent = send(s, items, &tx_cancel, || connect_and_pair(&peer, "tester", CODE), stop);
+        (sent, rx.join().unwrap())
+    }
+
+    /// Stop on the old PC: the new PC must hear about it and end promptly,
+    /// not sit out RESUME_WINDOW waiting for a resume.
+    #[test]
+    fn sender_stop_reaches_receiver() {
+        let (root, items) = make_files("txstop", 40, |_| 2_000_000);
+        let t = Instant::now();
+        let (sent, got) = run_stopped("txstop", &items, &root, true);
+        sent.unwrap();
+        let e = got.expect_err("receiver should report the stop");
+        assert!(e.to_string().contains("stopped on the old PC"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(15), "took {:?}", t.elapsed());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Stop on the new PC: the old PC must hear about it and end promptly.
+    #[test]
+    fn receiver_stop_reaches_sender() {
+        let (root, items) = make_files("rxstop", 40, |_| 2_000_000);
+        let t = Instant::now();
+        let (sent, got) = run_stopped("rxstop", &items, &root, false);
+        got.unwrap();
+        let e = sent.expect_err("sender should report the stop");
+        assert!(e.to_string().contains("stopped on the new PC"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(15), "took {:?}", t.elapsed());
         std::fs::remove_dir_all(&root).ok();
     }
 

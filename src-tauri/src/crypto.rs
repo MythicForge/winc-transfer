@@ -135,6 +135,12 @@ impl EncryptedStream {
         self.writer.get_ref().set_write_timeout(d)
     }
 
+    /// A second handle on the socket, so another thread can shut it down and
+    /// unblock a read or write stuck on a stalled peer.
+    pub fn socket(&self) -> io::Result<TcpStream> {
+        self.writer.get_ref().try_clone()
+    }
+
     /// Bound how long a read may block (None = forever).
     pub fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
         self.reader.get_ref().set_read_timeout(d)

@@ -153,7 +153,8 @@ pub struct HelloAck {
 /// `Vec<FileEntry>` follow, then the file stream. Chunked so a tree of hundreds
 /// of thousands of files never hits the per-frame size cap. `Resume` re-attaches
 /// a reconnecting sender to a transfer that broke; the receiver answers with
-/// `ResumeAt`.
+/// `ResumeAt`. `Cancel` tells a receiver waiting for a resume that the user
+/// stopped the transfer on the old PC, so it ends now instead of waiting.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Opening {
@@ -166,14 +167,20 @@ pub enum Opening {
     Resume {
         transfer_id: u64,
     },
+    Cancel {
+        transfer_id: u64,
+    },
 }
 
 /// RECEIVER -> SENDER reply to `Opening::Resume`: restart the file stream at
 /// manifest index `next` (the file that was in flight is rewritten whole).
+/// `stopped` (with `ok: false`): the user stopped it on the new PC.
 #[derive(Serialize, Deserialize)]
 pub struct ResumeAt {
     pub ok: bool,
     pub next: u64,
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 /// RECEIVER -> SENDER after the last file is on disk. The sender only calls

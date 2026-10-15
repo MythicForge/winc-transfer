@@ -16,6 +16,8 @@ pub fn TransferStep() -> impl IntoView {
         p.with(|p| matches!(p.state, XferState::Running | XferState::Reconnecting))
     });
     let reconnecting = Memo::new(move |_| p.with(|p| p.state == XferState::Reconnecting));
+    // Stop gives instant feedback; otherwise a slow stop reads as a dead button
+    let stopping = RwSignal::new(false);
     let pct = move || {
         p.with(|p| {
             if p.bytes_total > 0 {
@@ -98,11 +100,15 @@ pub fn TransferStep() -> impl IntoView {
                         view! {
                             <button
                                 class="btn"
-                                on:click=move |_| spawn_local(async {
-                                    let _ = api::cancel().await;
-                                })
+                                disabled=move || stopping.get()
+                                on:click=move |_| {
+                                    stopping.set(true);
+                                    spawn_local(async {
+                                        let _ = api::cancel().await;
+                                    })
+                                }
                             >
-                                "Stop transfer"
+                                {move || if stopping.get() { "Stopping…" } else { "Stop transfer" }}
                             </button>
                         }
                             .into_any()
