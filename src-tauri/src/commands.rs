@@ -37,6 +37,9 @@ pub struct Session {
     /// Who we paired with and the code — kept so a broken transfer can
     /// reconnect and resume without the user re-pairing.
     pub pair_info: Mutex<Option<(Peer, String)>>,
+    /// Next unused speed-test chunk on the paired connection (nonce hygiene
+    /// across repeated tests); reset on every pair.
+    pub bench_next: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -177,6 +180,7 @@ pub async fn pair(peer: Peer, code: String, app: AppHandle) -> Result<(), String
         let state = app.state::<Session>();
         *state.pair_info.lock().unwrap() = Some((peer.clone(), digits.clone()));
         *state.send_stream.lock().unwrap() = Some(stream);
+        state.bench_next.store(0, Ordering::Relaxed);
         let gen = state.pair_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let app = app.clone();
         std::thread::spawn(move || keep_alive(app, gen));
@@ -204,6 +208,43 @@ fn keep_alive(app: AppHandle, gen: u64) {
         }
         log::trace!("keep-alive sent");
     }
+}
+
+/// How long the link speed test streams for.
+const BENCH_TIME: Duration = Duration::from_secs(5);
+
+/// Link speed test on the paired connection (sender, before choosing data):
+/// in-memory data only, so the result is the cable + TCP + encryption limit
+/// with no disk involved. Returns bytes/sec.
+#[tauri::command]
+pub async fn link_benchmark(app: AppHandle) -> Result<f64, String> {
+    blocking(move || {
+        let state = app.state::<Session>();
+        // the keep-alive thread quits when it finds the stream gone; a fresh
+        // one is started once the stream is back
+        let mut stream = state.send_stream.lock().unwrap().take().ok_or_else(|| {
+            log::error!("speed test called with no paired connection");
+            "not paired — pair with the new PC first".to_string()
+        })?;
+        log::info!("speed test: streaming test data for {}s", BENCH_TIME.as_secs());
+        let first = state.bench_next.load(Ordering::Relaxed);
+        match crate::transfer::bench_send(&mut stream, first, BENCH_TIME) {
+            Ok((bps, next)) => {
+                log::info!("speed test: {:.0} MB/s ({:.1} Gbit/s)", bps / 1e6, bps * 8.0 / 1e9);
+                state.bench_next.store(next, Ordering::Relaxed);
+                *state.send_stream.lock().unwrap() = Some(stream);
+                let gen = state.pair_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                let app = app.clone();
+                std::thread::spawn(move || keep_alive(app, gen));
+                Ok(bps)
+            }
+            Err(e) => {
+                log::error!("speed test failed: {e}");
+                Err(format!("speed test failed: {e} — pair again"))
+            }
+        }
+    })
+    .await
 }
 
 #[tauri::command]

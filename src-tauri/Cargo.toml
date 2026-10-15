@@ -1,6 +1,6 @@
 [package]
 name = "winc"
-version = "0.11.2"
+version = "0.12.0"
 description = "WINC — direct-cable PC data crossing"
 authors = ["you"]
 license = ""
@@ -36,8 +36,15 @@ hkdf = "0.12"
 sha2 = "0.10"
 # free disk space for the receiver's drop-folder pickers + pre-transfer check
 fs4 = "0.13"
+# socket send/receive buffer sizes (std doesn't expose them)
+socket2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # adapter hardware descriptions (Thunderbolt/USB4 detection) — if-addrs only
 # exposes the friendly name ("Ethernet 3")
 ipconfig = "0.3"
+
+# transfer speed: whole-program optimisation for the crypto + copy hot loops
+[profile.release]
+lto = "fat"
+codegen-units = 1

@@ -12,7 +12,7 @@
 //! this module has no Tauri dependency and the tests can break the link on
 //! purpose.
 
-use crate::crypto::EncryptedStream;
+use crate::crypto::{EncryptedStream, Opener, Sealer, TAG_LEN};
 use crate::model::*;
 use crate::net::safe_join;
 use crate::sources::Item;
@@ -21,10 +21,20 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const BUF: usize = 256 * 1024;
+/// Plaintext per data frame. Big enough that per-frame costs (syscalls, tag,
+/// channel hop) vanish, small enough that Stop and progress stay snappy.
+const BUF: usize = 1024 * 1024;
+/// Sender threads opening, reading and sealing files ahead of the socket.
+const READERS: usize = 4;
+/// Receiver threads opening and writing files behind the socket.
+const WRITERS: usize = 4;
+/// Frames queued per reader/writer thread — bounds memory in flight to about
+/// (READERS + WRITERS) × READ_AHEAD × BUF.
+const READ_AHEAD: usize = 8;
 /// Manifest entries per frame — ~3 MB of JSON, far under crypto::MAX_FRAME.
 const MANIFEST_CHUNK: usize = 20_000;
 /// Receiver gives up if nothing at all (not even a heartbeat) arrives for this
@@ -200,6 +210,9 @@ where
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     let total_files = entries.len() as u64;
     let offs = offsets(entries.iter().map(|e| e.size));
+    if items.len() >= BENCH_FILE as usize {
+        return Err(io::Error::other("too many files for one transfer — split the selection"));
+    }
     let transfer_id: u64 = rand::random();
     let chunks = entries.chunks(MANIFEST_CHUNK);
 
@@ -282,8 +295,45 @@ where
     Ok(())
 }
 
+/// One file's worth of output from a reader: sealed frames, then the sealed
+/// end-of-file marker (`end: Some(read_ok)`).
+struct Piece {
+    wire: Vec<u8>,
+    plain: usize,
+    end: Option<bool>,
+}
+
+/// Where a pipelined side spent its time waiting — the bigger number is the
+/// bottleneck. Logged once per transfer.
+#[derive(Default)]
+struct Waits {
+    /// sender: on readers (disk + crypto); receiver: on writers (crypto + disk)
+    local: Duration,
+    /// on the socket
+    net: Duration,
+}
+
+impl Waits {
+    fn log(&self, side: &str, local: &str, wall: Duration) {
+        let pct = |d: Duration| 100.0 * d.as_secs_f64() / wall.as_secs_f64().max(0.001);
+        log::info!(
+            "{side} time split over {:.1}s: waiting on {local} {:.1}s ({:.0}%), on the network {:.1}s ({:.0}%)",
+            wall.as_secs_f64(),
+            self.local.as_secs_f64(),
+            pct(self.local),
+            self.net.as_secs_f64(),
+            pct(self.net)
+        );
+    }
+}
+
 /// Files `next..` onto the wire. Any error here is a link error — unreadable
 /// files are skipped in-band (empty frame), so the receiver stays in step.
+///
+/// READERS threads open, read and seal files ahead of the socket — file `i`
+/// goes to reader `(i - next) % READERS`, so this thread takes them back in
+/// manifest order with no reorder buffer. Disk, crypto and network overlap,
+/// and the many-small-files case opens READERS files at a time.
 #[allow(clippy::too_many_arguments)]
 fn send_from<F: Fn(TransferProgress)>(
     stream: &mut EncryptedStream,
@@ -295,25 +345,46 @@ fn send_from<F: Fn(TransferProgress)>(
     emit: &F,
     start: Instant,
 ) -> io::Result<SendFlow> {
-    let total_bytes = offs[items.len()];
-    let total_files = items.len() as u64;
-    let mut sent = offs[next];
-    let mut buf = vec![0u8; BUF];
-    let mut last_emit = Instant::now() - Duration::from_secs(1);
-
-    // A file read never yields a 0-byte chunk, so the empty frame is an
-    // unambiguous end-of-file marker. That lets an unreadable file (e.g. an
-    // un-hydrated OneDrive placeholder failing with os error 362) be skipped
-    // without desyncing the receiver, which doesn't rely on manifest sizes.
-    for (idx, item) in items.iter().enumerate().skip(next) {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(SendFlow::Cancelled);
+    let sealer = stream.sealer();
+    let t0 = Instant::now();
+    let mut waits = Waits::default();
+    let out = std::thread::scope(|sc| {
+        let mut rxs = Vec::with_capacity(READERS);
+        for r in 0..READERS {
+            let (tx, rx) = mpsc::sync_channel::<Piece>(READ_AHEAD);
+            rxs.push(rx);
+            let sealer = sealer.clone();
+            sc.spawn(move || read_files(items, next + r, &sealer, cancel, tx));
         }
-        log::trace!("sending {}", item.rel);
+        let out = write_pieces(stream, items, next, offs, failed, cancel, emit, start, &rxs, &mut waits);
+        drop(rxs); // readers blocked on a full channel see it closed and exit
+        out
+    });
+    waits.log("send", "disk/encryption", t0.elapsed());
+    out
+}
+
+/// Reader thread: files `first`, `first + READERS`, … sealed into `tx`.
+fn read_files(items: &[Item], first: usize, sealer: &Sealer, cancel: &AtomicBool, tx: SyncSender<Piece>) {
+    // one read buffer per thread; each frame is then sized to what was read,
+    // so a 40-byte file costs 40 bytes, not a fresh zeroed megabyte
+    let mut scratch = vec![0u8; BUF];
+    for idx in (first..items.len()).step_by(READERS) {
+        let item = &items[idx];
+        let file = idx as u32;
+        let mut chunk = 0u64;
         let mut ok = true;
+        log::trace!("sending {}", item.rel);
+        // A file read never yields a 0-byte chunk, so the empty frame is an
+        // unambiguous end-of-file marker. That lets an unreadable file (e.g. an
+        // un-hydrated OneDrive placeholder failing with os error 362) be skipped
+        // without desyncing the receiver, which doesn't rely on manifest sizes.
         match std::fs::File::open(&item.abs) {
             Ok(mut f) => loop {
-                let n = match f.read(&mut buf) {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let n = match f.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(n) => n,
                     // cloud placeholder / IO fault mid-read: stop this file, keep the stream sane
@@ -323,23 +394,16 @@ fn send_from<F: Fn(TransferProgress)>(
                         break;
                     }
                 };
-                // per chunk, not per file: a multi-GB file must not hold up Stop
-                if cancel.load(Ordering::Relaxed) {
-                    return Ok(SendFlow::Cancelled);
+                let mut buf = Vec::with_capacity(4 + n + TAG_LEN);
+                buf.extend_from_slice(&[0; 4]);
+                buf.extend_from_slice(&scratch[..n]);
+                if sealer.seal(file, chunk, &mut buf).is_err() {
+                    ok = false;
+                    break;
                 }
-                stream.write_frame(&buf[..n])?;
-                sent += n as u64;
-                if last_emit.elapsed() >= Duration::from_millis(150) {
-                    let secs = start.elapsed().as_secs_f64().max(0.001);
-                    emit(TransferProgress::running(
-                        sent,
-                        total_bytes,
-                        idx as u64,
-                        total_files,
-                        sent as f64 / secs,
-                        &item.rel,
-                    ));
-                    last_emit = Instant::now();
+                chunk += 1;
+                if tx.send(Piece { wire: buf, plain: n, end: None }).is_err() {
+                    return; // the writer is gone
                 }
             },
             // locked/removed/placeholder: skip cleanly
@@ -348,15 +412,182 @@ fn send_from<F: Fn(TransferProgress)>(
                 ok = false;
             }
         }
-        stream.write_frame(&[])?; // end of this file
-        if ok {
-            failed.remove(&idx);
-        } else {
-            failed.insert(idx);
+        let mut end = vec![0u8; 4];
+        if sealer.seal(file, chunk, &mut end).is_err()
+            || tx.send(Piece { wire: end, plain: 0, end: Some(ok) }).is_err()
+        {
+            return;
         }
     }
+}
+
+/// The socket side of `send_from`: pieces back in manifest order, onto the wire.
+#[allow(clippy::too_many_arguments)]
+fn write_pieces<F: Fn(TransferProgress)>(
+    stream: &mut EncryptedStream,
+    items: &[Item],
+    next: usize,
+    offs: &[u64],
+    failed: &mut BTreeSet<usize>,
+    cancel: &AtomicBool,
+    emit: &F,
+    start: Instant,
+    rxs: &[Receiver<Piece>],
+    waits: &mut Waits,
+) -> io::Result<SendFlow> {
+    let total_bytes = offs[items.len()];
+    let total_files = items.len() as u64;
+    let mut sent = offs[next];
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+
+    for idx in next..items.len() {
+        let rx = &rxs[(idx - next) % READERS];
+        loop {
+            // per frame, not per file: a multi-GB file must not hold up Stop
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(SendFlow::Cancelled);
+            }
+            let t = Instant::now();
+            let Ok(piece) = rx.recv() else {
+                // readers only quit early on cancel
+                return Ok(SendFlow::Cancelled);
+            };
+            waits.local += t.elapsed();
+            let t = Instant::now();
+            stream.write_raw(&piece.wire)?;
+            waits.net += t.elapsed();
+            if let Some(ok) = piece.end {
+                if ok {
+                    failed.remove(&idx);
+                } else {
+                    failed.insert(idx);
+                }
+                break;
+            }
+            sent += piece.plain as u64;
+            if last_emit.elapsed() >= Duration::from_millis(150) {
+                let secs = start.elapsed().as_secs_f64().max(0.001);
+                emit(TransferProgress::running(
+                    sent,
+                    total_bytes,
+                    idx as u64,
+                    total_files,
+                    sent as f64 / secs,
+                    &items[idx].rel,
+                ));
+                last_emit = Instant::now();
+            }
+        }
+    }
+    let t = Instant::now();
     stream.flush()?;
+    waits.net += t.elapsed();
     Ok(SendFlow::Done)
+}
+
+/// Data-frame file id for speed-test frames: no manifest reaches it, so their
+/// nonces never collide with a real transfer's on the same connection.
+const BENCH_FILE: u32 = u32::MAX;
+
+/// Link speed test on a paired, idle connection: sealed in-memory frames for
+/// about `dur` (READERS threads sealing, as in a real send); the receiver opens
+/// and drops them and confirms. No disk on either side, so this is what cable,
+/// TCP and encryption can do. `first` is the first unused bench chunk on this
+/// connection. Returns (bytes/sec, next unused chunk).
+pub fn bench_send(stream: &mut EncryptedStream, first: u64, dur: Duration) -> io::Result<(f64, u64)> {
+    stream.set_write_timeout(Some(WRITE_STALL))?;
+    stream.write_json(&Opening::Bench { first })?;
+    let sealer = stream.sealer();
+    let stop = AtomicBool::new(false);
+    let t = Instant::now();
+    let mut chunk = first;
+    std::thread::scope(|sc| -> io::Result<()> {
+        let mut rxs = Vec::with_capacity(READERS);
+        for r in 0..READERS as u64 {
+            let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(READ_AHEAD);
+            rxs.push(rx);
+            let (sealer, stop) = (sealer.clone(), &stop);
+            sc.spawn(move || {
+                let mut c = first + r;
+                while !stop.load(Ordering::Relaxed) {
+                    let mut buf = vec![0u8; 4 + BUF];
+                    buf.reserve(TAG_LEN);
+                    if sealer.seal(BENCH_FILE, c, &mut buf).is_err() || tx.send(buf).is_err() {
+                        return;
+                    }
+                    c += READERS as u64;
+                }
+            });
+        }
+        let out = (|| {
+            while t.elapsed() < dur {
+                let frame = rxs[((chunk - first) % READERS as u64) as usize]
+                    .recv()
+                    .map_err(|_| io::Error::other("speed test stalled"))?;
+                stream.write_raw(&frame)?;
+                chunk += 1;
+            }
+            Ok(())
+        })();
+        stop.store(true, Ordering::Relaxed);
+        drop(rxs);
+        out
+    })?;
+    let mut end = vec![0u8; 4];
+    sealer.seal(BENCH_FILE, chunk, &mut end)?;
+    stream.write_raw(&end)?;
+    stream.flush()?;
+    await_finished(stream)?;
+    stream.set_read_timeout(None)?;
+    let bytes = (chunk - first) * BUF as u64;
+    Ok((bytes as f64 / t.elapsed().as_secs_f64().max(0.001), chunk + 1))
+}
+
+/// Receiver side of `bench_send`: open (to include decryption) and drop.
+fn bench_recv(stream: &mut EncryptedStream, first: u64) -> io::Result<()> {
+    stream.set_read_timeout(Some(RECV_STALL))?;
+    let opener = stream.opener();
+    let t = Instant::now();
+    let mut bytes = 0u64;
+    let damaged = AtomicBool::new(false);
+    std::thread::scope(|sc| -> io::Result<()> {
+        let mut txs = Vec::with_capacity(WRITERS);
+        for _ in 0..WRITERS {
+            let (tx, rx) = mpsc::sync_channel::<(u64, Vec<u8>)>(READ_AHEAD);
+            txs.push(tx);
+            let (opener, damaged) = (opener.clone(), &damaged);
+            sc.spawn(move || {
+                for (c, mut body) in rx {
+                    if opener.open(BENCH_FILE, c, &mut body).is_err() {
+                        damaged.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+        let mut c = first;
+        loop {
+            let mut body = Vec::new();
+            stream.read_raw(&mut body)?;
+            let end = body.len() == TAG_LEN;
+            bytes += (body.len() - TAG_LEN) as u64;
+            let _ = txs[((c - first) % WRITERS as u64) as usize].send((c, body));
+            c += 1;
+            if end {
+                return Ok(());
+            }
+        }
+    })?;
+    if damaged.load(Ordering::Relaxed) {
+        log::error!("speed test: data arrived damaged — the network path is altering bytes");
+    }
+    stream.write_json(&Finished { ok: !damaged.load(Ordering::Relaxed) })?;
+    log::info!(
+        "speed test: received {:.2} GB in {:.1}s ({:.0} MB/s)",
+        bytes as f64 / 1e9,
+        t.elapsed().as_secs_f64(),
+        bytes as f64 / t.elapsed().as_secs_f64().max(0.001) / 1e6
+    );
+    Ok(())
 }
 
 /// Stop pressed on this PC. The old link is already closed, so the receiver
@@ -534,15 +765,20 @@ where
     F: Fn(TransferProgress),
     A: FnMut(Instant, &AtomicBool) -> io::Result<EncryptedStream>,
 {
-    let (transfer_id, total_bytes, total_files, chunks) = match read_opening(&mut stream)
-        .inspect_err(|e| log::error!("could not read the manifest: {e}"))?
-    {
-        Opening::Start { transfer_id, total_bytes, total_files, chunks } => {
-            (transfer_id, total_bytes, total_files, chunks)
-        }
-        Opening::Resume { .. } | Opening::Cancel { .. } => {
-            log::error!("sender referred to a transfer this receiver never started");
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected resume"));
+    // any number of speed tests may come before the transfer itself
+    let (transfer_id, total_bytes, total_files, chunks) = loop {
+        match read_opening(&mut stream).inspect_err(|e| log::error!("could not read the manifest: {e}"))? {
+            Opening::Start { transfer_id, total_bytes, total_files, chunks } => {
+                break (transfer_id, total_bytes, total_files, chunks)
+            }
+            Opening::Bench { first } => {
+                log::info!("speed test requested by the sender");
+                bench_recv(&mut stream, first).inspect_err(|e| log::error!("speed test failed: {e}"))?;
+            }
+            Opening::Resume { .. } | Opening::Cancel { .. } => {
+                log::error!("sender referred to a transfer this receiver never started");
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected resume"));
+            }
         }
     };
     let mut files: Vec<FileEntry> = Vec::with_capacity(total_files as usize);
@@ -716,6 +952,7 @@ where
                 let _ = s.write_json(&ResumeAt { ok: false, next: 0, stopped: false });
             }
             Ok(Opening::Cancel { .. }) => log::warn!("a sender cancelled a different transfer — ignored"),
+            Ok(Opening::Bench { .. }) => log::warn!("a sender asked for a speed test mid-resume — refused"),
             Ok(Opening::Start { .. }) => {
                 log::warn!("a sender tried to start a new transfer mid-resume — refused");
             }
@@ -724,23 +961,23 @@ where
     }
 }
 
-/// A decrypt failure AFTER pairing isn't a wrong code (the manifest already
-/// decrypted): the bytes changed in transit. Name it, and where it happened.
-fn link_error(e: io::Error, stream: &EncryptedStream, rel: &str, got: u64) -> io::Error {
-    if e.kind() != io::ErrorKind::PermissionDenied {
-        return e;
-    }
-    log::error!(
-        "integrity check failed on frame #{} while receiving '{rel}', {:.2} GB in — data was altered in transit",
-        stream.frames_read(),
-        got as f64 / 1e9
-    );
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("data arrived damaged while receiving '{rel}' (failed the integrity check)"),
-    )
+/// What went wrong on a writer thread, first one wins.
+enum WriterErr {
+    /// Disk-side: not resumable.
+    Local(io::Error),
+    /// A frame failed its integrity check — the bytes changed in transit.
+    Damaged(io::Error),
 }
 
+/// Files `next..` off the wire into `dest`.
+///
+/// This thread only reads sealed frames off the socket; WRITERS threads open
+/// (decrypt) and write them — file `i` goes to writer `(i - next) % WRITERS`,
+/// so several small files are created at once (each create pays the
+/// antivirus scan on Windows) and decryption is spread over cores.
+///
+/// On a link error the resume point is the lowest file not yet fully on disk;
+/// later files that did finish are simply rewritten.
 #[allow(clippy::too_many_arguments)]
 fn recv_from<F: Fn(TransferProgress)>(
     stream: &mut EncryptedStream,
@@ -752,45 +989,85 @@ fn recv_from<F: Fn(TransferProgress)>(
     emit: &F,
     start: Instant,
 ) -> Result<RecvFlow, RecvErr> {
+    let opener = stream.opener();
+    let done: Vec<AtomicBool> = (0..files.len()).map(|_| AtomicBool::new(false)).collect();
+    let fail: Mutex<Option<WriterErr>> = Mutex::new(None);
+    let t0 = Instant::now();
+    let mut waits = Waits::default();
+    let out = std::thread::scope(|sc| {
+        let mut txs = Vec::with_capacity(WRITERS);
+        for w in 0..WRITERS {
+            let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(READ_AHEAD);
+            txs.push(tx);
+            let (opener, done, fail) = (opener.clone(), &done, &fail);
+            sc.spawn(move || write_files(dest, files, next + w, &opener, rx, done, fail));
+        }
+        read_frames(stream, files, next, offs, cancel, emit, start, &txs, &mut waits)
+        // txs drop here: writers finish what they hold, then exit
+    });
+    waits.log("receive", "decryption/disk", t0.elapsed());
+
+    // first incomplete file — where a resume picks up
+    let at = (next..files.len())
+        .find(|&i| !done[i].load(Ordering::Relaxed))
+        .unwrap_or(files.len());
+    match fail.into_inner().unwrap() {
+        Some(WriterErr::Local(e)) => return Err(RecvErr::Local(e)),
+        Some(WriterErr::Damaged(e)) => return Err(RecvErr::Link { e, at }),
+        None => {}
+    }
+    match out {
+        Ok(RecvFlow::Done) if at < files.len() => Err(RecvErr::Link {
+            e: io::Error::other("a file did not finish writing"),
+            at,
+        }),
+        Ok(flow) => Ok(flow),
+        Err(e) => Err(RecvErr::Link { e, at }),
+    }
+}
+
+/// The socket side of `recv_from`: sealed frames, in order, to their writer.
+/// Returns Ok(Done) once every frame is handed over; Err on a link error.
+#[allow(clippy::too_many_arguments)]
+fn read_frames<F: Fn(TransferProgress)>(
+    stream: &mut EncryptedStream,
+    files: &[FileEntry],
+    next: usize,
+    offs: &[u64],
+    cancel: &AtomicBool,
+    emit: &F,
+    start: Instant,
+    txs: &[SyncSender<Vec<u8>>],
+    waits: &mut Waits,
+) -> io::Result<RecvFlow> {
     let total_bytes = offs[files.len()];
     let total_files = files.len() as u64;
     let mut got = offs[next];
     let mut last_emit = Instant::now() - Duration::from_secs(1);
 
     for (idx, entry) in files.iter().enumerate().skip(next) {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(RecvFlow::Cancelled);
-        }
-        let out_path = safe_join(dest, &entry.rel);
-        log::trace!("receiving {}", entry.rel);
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                log::error!("could not create {}: {e}", parent.display());
-                RecvErr::Local(e)
-            })?;
-        }
-        // create() truncates, so a file that was in flight when the link broke
-        // is rewritten whole on resume
-        let mut out = std::fs::File::create(&out_path).map_err(|e| {
-            log::error!("could not create {}: {e}", out_path.display());
-            RecvErr::Local(e)
-        })?;
+        let tx = &txs[(idx - next) % WRITERS];
         loop {
-            let chunk = stream.read_frame().map_err(|e| RecvErr::Link {
-                e: link_error(e, stream, &entry.rel, got),
-                at: idx,
-            })?;
-            if chunk.is_empty() {
-                break; // end of this file
-            }
             if cancel.load(Ordering::Relaxed) {
                 return Ok(RecvFlow::Cancelled);
             }
-            out.write_all(&chunk).map_err(|e| {
-                log::error!("could not write {}: {e}", out_path.display());
-                RecvErr::Local(e)
-            })?;
-            got += chunk.len() as u64;
+            let mut body = Vec::new(); // read_raw sizes it to the frame
+            let t = Instant::now();
+            stream.read_raw(&mut body)?;
+            waits.net += t.elapsed();
+            // an empty plaintext seals to exactly a tag: this file's end marker
+            let end = body.len() == TAG_LEN;
+            let len = body.len() - TAG_LEN;
+            let t = Instant::now();
+            if tx.send(body).is_err() {
+                // the writer stopped on an error it recorded — recv_from reports it
+                return Ok(RecvFlow::Done);
+            }
+            waits.local += t.elapsed();
+            if end {
+                break;
+            }
+            got += len as u64;
             if last_emit.elapsed() >= Duration::from_millis(150) {
                 let secs = start.elapsed().as_secs_f64().max(0.001);
                 emit(TransferProgress::running(
@@ -806,6 +1083,77 @@ fn recv_from<F: Fn(TransferProgress)>(
         }
     }
     Ok(RecvFlow::Done)
+}
+
+/// Writer thread: files `first`, `first + WRITERS`, … from `rx` onto disk.
+/// Stops quietly when `rx` closes (link broke / cancel / done); on its own
+/// error, records it in `fail` and stops.
+fn write_files(
+    dest: &Path,
+    files: &[FileEntry],
+    first: usize,
+    opener: &Opener,
+    rx: Receiver<Vec<u8>>,
+    done: &[AtomicBool],
+    fail: &Mutex<Option<WriterErr>>,
+) {
+    let record = |e: WriterErr| {
+        fail.lock().unwrap().get_or_insert(e);
+    };
+    for idx in (first..files.len()).step_by(WRITERS) {
+        let entry = &files[idx];
+        let out_path = safe_join(dest, &entry.rel);
+        log::trace!("receiving {}", entry.rel);
+        if let Some(parent) = out_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::error!("could not create {}: {e}", parent.display());
+                return record(WriterErr::Local(e));
+            }
+        }
+        // create() truncates, so a file that was in flight when the link broke
+        // is rewritten whole on resume
+        let mut out = match std::fs::File::create(&out_path) {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!("could not create {}: {e}", out_path.display());
+                return record(WriterErr::Local(e));
+            }
+        };
+        // reserve the whole file up front: one allocation, less fragmentation
+        let _ = out.set_len(entry.size);
+        let mut written = 0u64;
+        let mut chunk = 0u64;
+        loop {
+            let Ok(mut body) = rx.recv() else { return };
+            if opener.open(idx as u32, chunk, &mut body).is_err() {
+                log::error!(
+                    "integrity check failed on chunk #{chunk} of '{}' — data was altered in transit",
+                    entry.rel
+                );
+                return record(WriterErr::Damaged(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("data arrived damaged while receiving '{}' (failed the integrity check)", entry.rel),
+                )));
+            }
+            chunk += 1;
+            if body.is_empty() {
+                break; // end of this file
+            }
+            if let Err(e) = out.write_all(&body) {
+                log::error!("could not write {}: {e}", out_path.display());
+                return record(WriterErr::Local(e));
+            }
+            written += body.len() as u64;
+        }
+        // skipped or changed on the sender since the scan: trim the reservation
+        if written != entry.size {
+            if let Err(e) = out.set_len(written) {
+                log::error!("could not size {}: {e}", out_path.display());
+                return record(WriterErr::Local(e));
+            }
+        }
+        done[idx].store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -977,6 +1325,35 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Two speed tests on the paired connection, then a normal transfer on the
+    /// same connection must still land byte-identical.
+    #[test]
+    fn speed_test_then_transfer() {
+        let (root, items) = make_files("bench", 30, |i| 50_000 + i * 70_001);
+        let dest = root.join("dest-bench");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (c2, d2) = (cancel.clone(), dest.clone());
+        let rx = std::thread::spawn(move || {
+            let (s, _) = accept_and_verify(&listener, CODE, &c2, None).unwrap();
+            let reaccept = |deadline: Instant, c: &AtomicBool| {
+                accept_and_verify(&listener, CODE, c, Some(deadline)).map(|(s, _)| s)
+            };
+            receive(s, &d2, &c2, reaccept, |_| {})
+        });
+        let peer = Peer { name: "t".into(), ip: "127.0.0.1".into(), port };
+        let mut s = connect_and_pair(&peer, "tester", CODE).unwrap();
+        let (bps, next) = bench_send(&mut s, 0, Duration::from_millis(300)).unwrap();
+        assert!(bps > 0.0 && next > 0);
+        let (_, next2) = bench_send(&mut s, next, Duration::from_millis(300)).unwrap();
+        assert!(next2 > next);
+        send(s, &items, &cancel, || connect_and_pair(&peer, "tester", CODE), |_| {}).unwrap();
+        rx.join().unwrap().unwrap();
+        assert_same(&items, &dest);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Pair and transfer with a separate Stop flag per side; the side named by
     /// `stop_sender` presses Stop as soon as data is flowing.
     fn run_stopped(tag: &str, items: &[Item], root: &Path, stop_sender: bool) -> (io::Result<()>, io::Result<()>) {
@@ -1048,7 +1425,10 @@ mod tests {
         });
         let total: u64 = items.iter().map(|i| i.size).sum();
         eprintln!("stress: {} files, {:.2} GB", items.len(), total as f64 / 1e9);
+        let t = Instant::now();
         let (sent, got, dest) = run("stress", &items, &root, |p| p, 1);
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("stress: transferred in {secs:.1}s ({:.0} MB/s)", total as f64 / secs / 1e6);
         sent.unwrap();
         got.unwrap();
         assert_same(&items, &dest);

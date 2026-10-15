@@ -288,6 +288,19 @@ pub fn discover(timeout: Duration) -> Option<Peer> {
     None
 }
 
+/// Socket send/receive buffers. Windows' defaults leave a fast sender idle
+/// waiting for ACKs between writes of 1 MB frames; a few MB keeps the pipe full.
+const SOCK_BUF: usize = 4 * 1024 * 1024;
+
+/// Per-connection socket settings for bulk transfer.
+fn tune(stream: &TcpStream) {
+    stream.set_nodelay(true).ok();
+    let s = socket2::SockRef::from(stream);
+    if let Err(e) = s.set_send_buffer_size(SOCK_BUF).and_then(|_| s.set_recv_buffer_size(SOCK_BUF)) {
+        log::warn!("could not size socket buffers: {e}");
+    }
+}
+
 /* ---------------- sender side ---------------- */
 
 /// Connect to the receiver, run the encrypted (SPAKE2) handshake, and prove the
@@ -302,7 +315,7 @@ pub fn connect_and_pair(peer: &Peer, my_name: &str, code: &str) -> io::Result<En
             "connect to {addr} failed: {e} — receiver not listening, wrong IP, or inbound TCP blocked on the other PC"
         );
     })?;
-    stream.set_nodelay(true).ok();
+    tune(&stream);
     log::debug!("TCP up to {addr}; running SPAKE2 handshake");
     let mut enc = crypto::pake_handshake(&stream, code, true).inspect_err(|e| {
         log::error!("handshake with {addr} failed: {e}");
@@ -367,7 +380,7 @@ pub fn accept_and_verify(
     };
     log::info!("inbound connection from {addr}");
     stream.set_nonblocking(false)?; // blocking again for the transfer
-    stream.set_nodelay(true).ok();
+    tune(&stream);
     let mut enc = crypto::pake_handshake(&stream, code, false).inspect_err(|e| {
         log::error!("handshake with {addr} failed: {e}");
     })?;
@@ -386,7 +399,14 @@ pub fn accept_and_verify(
         }
     };
     if hello.magic != PROTO_MAGIC {
-        log::error!("{addr} is not a WINC peer (magic '{}')", hello.magic);
+        if hello.magic.starts_with("WINC") {
+            log::error!(
+                "{addr} runs a different WINC version (protocol '{}', this PC '{PROTO_MAGIC}') — install the same WINC version on both PCs",
+                hello.magic
+            );
+        } else {
+            log::error!("{addr} is not a WINC peer (magic '{}')", hello.magic);
+        }
         return Err(io::Error::new(io::ErrorKind::InvalidData, "not a WINC peer"));
     }
     enc.write_json(&HelloAck { ok: true })?;

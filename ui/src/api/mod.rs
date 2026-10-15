@@ -232,6 +232,15 @@ pub async fn import_browser_retry(dir: &str, label: &str) -> Result<ImportEntry,
     invoke("import_browser_retry", json!({ "dir": dir, "label": label })).await
 }
 
+/// SEND side, paired: ~5 s link speed test with in-memory data (no disk).
+/// Returns bytes/sec.
+pub async fn link_benchmark() -> Result<f64, String> {
+    if mock() {
+        return Ok(mock::link_benchmark().await);
+    }
+    invoke("link_benchmark", ()).await
+}
+
 /// Stop everything in flight (accept loop, transfer, beacon).
 pub async fn cancel() -> Result<(), String> {
     if mock() {

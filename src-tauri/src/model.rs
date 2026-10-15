@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 pub const DISCOVERY_PORT: u16 = 50737; // UDP beacon
 pub const TRANSFER_PORT: u16 = 50738; // preferred TCP port (so manual IP entry needs no port)
-/// Bumped to 2 in 0.9.0 (heartbeats + chunked manifest) and 3 in 0.11.0
-/// (auto-resume) — older builds see "not a WINC peer" instead of a garbled stream.
-pub const PROTO_MAGIC: &str = "WINC3";
+/// Bumped to 2 in 0.9.0 (heartbeats + chunked manifest), 3 in 0.11.0
+/// (auto-resume) and 4 in 0.12.0 (position-keyed data frames, pipelined) —
+/// older builds see "not a WINC peer" instead of a garbled stream.
+pub const PROTO_MAGIC: &str = "WINC4";
 
 /// Direct-cable network link state, surfaced to the UI.
 #[derive(Serialize, Clone, Default)]
@@ -169,6 +170,12 @@ pub enum Opening {
     },
     Cancel {
         transfer_id: u64,
+    },
+    /// Link speed test: sealed throwaway frames from chunk `first` on, until
+    /// an empty one; the receiver drops them and answers `Finished`. Then the
+    /// connection carries on as before (heartbeats, `Start`).
+    Bench {
+        first: u64,
     },
 }
 

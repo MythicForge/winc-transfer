@@ -306,6 +306,11 @@ pub async fn import_browser_retry(label: &str) -> ImportEntry {
     entry(&format!("{label} (browser)"), "imported", 9, None, Some(label))
 }
 
+pub async fn link_benchmark() -> f64 {
+    sleep(1500).await;
+    1.15e9
+}
+
 pub async fn cancel() {
     log::warn("mock", "cancel — stopping everything in flight");
     CANCELLED.with(|c| c.set(true));

@@ -1,5 +1,5 @@
 use crate::api;
-use crate::format::{bytes, count};
+use crate::format::{bytes, count, rate};
 use crate::log;
 use crate::store::{use_store, Step};
 use crate::types::{SourceGroup, TransferMode};
@@ -68,6 +68,28 @@ pub fn SelectStep() -> impl IntoView {
     };
 
     let busy_note = move || busy.get().then(|| view! { <span class="pick-busy">"Measuring…"</span> });
+
+    // link speed test: borrows the paired connection, so no transfer meanwhile
+    let testing = RwSignal::new(false);
+    let speed = RwSignal::new(String::new());
+    let run_test = move |_| {
+        testing.set(true);
+        speed.set(String::new());
+        spawn_local(async move {
+            match api::link_benchmark().await {
+                Ok(bps) => speed.set(format!(
+                    "≈ {} ({:.1} Gbit/s) — cable, network and encryption, no disk",
+                    rate(bps),
+                    bps * 8.0 / 1e9
+                )),
+                Err(e) => {
+                    log::error("ui::select", &format!("speed test failed: {e}"));
+                    speed.set(e);
+                }
+            }
+            testing.set(false);
+        });
+    };
 
     let custom_list = move || {
         view! {
@@ -250,11 +272,18 @@ pub fn SelectStep() -> impl IntoView {
                 </div>
                 <button
                     class="btn btn--primary"
-                    disabled=move || chosen.get().0 == 0 || busy.get()
+                    disabled=move || chosen.get().0 == 0 || busy.get() || testing.get()
                     on:click=move |_| store.step.set(Step::Transfer)
                 >
                     "Start transfer →"
                 </button>
+            </div>
+
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px">
+                <button class="btn btn--ghost" disabled=move || testing.get() on:click=run_test>
+                    {move || if testing.get() { "Testing link…" } else { "Test link speed" }}
+                </button>
+                <span class="mono" style="font-size: var(--step--1)">{move || speed.get()}</span>
             </div>
         </div>
     }

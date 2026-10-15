@@ -31,6 +31,7 @@ pub fn run() {
             commands::list_sources,
             commands::measure_paths,
             commands::start_send,
+            commands::link_benchmark,
             commands::receive,
             commands::cancel,
             commands::allow_firewall,
