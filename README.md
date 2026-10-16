@@ -6,7 +6,7 @@
 
 **Version 1.2.0**
 
-Move files and browser data from an **old Windows PC** to a **new one** — two
+Move files and browser data from one device as a **sender** to one as **reciever** — two
 ways, your choice:
 
 - **Direct cable** — a single Thunderbolt 3/4 or USB4 cable between the PCs.
