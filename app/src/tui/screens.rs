@@ -492,7 +492,7 @@ fn select(app: &TuiApp, ui: &mut Ui) {
         "add:picks".to_string()
     } else {
         if app.sources.is_empty() {
-            ui.line(&[("No user folders or browsers found on this PC — use Custom Transfer, or add a folder.", dim())]);
+            ui.line(&[("No user folders or browsers found on this PC — use Custom Transfer, or add files / folders.", dim())]);
         }
         for s in &app.sources {
             source_row(ui, s);
@@ -502,7 +502,7 @@ fn select(app: &TuiApp, ui: &mut Ui) {
             btn(
                 "add:src",
                 BtnKind::Plain,
-                "+ Add a folder…",
+                "+ Add files / folders…",
                 (!app.picking).then_some(Msg::Pick(PickInto::Sources)),
             ),
             btn(

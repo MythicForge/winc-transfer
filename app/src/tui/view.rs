@@ -467,9 +467,6 @@ fn picker(app: &mut TuiApp, buf: &mut Buffer, area: Rect, focus: &str) -> Vec<Hi
     let title = match p.purpose {
         super::picker::PickFor::Drop => "Where incoming data lands",
         super::picker::PickFor::ImportFolder => "Import into this folder",
-        super::picker::PickFor::Into(_) if p.kind == (super::picker::PickKind::Many { dirs_only: true }) => {
-            "Add folders"
-        }
         super::picker::PickFor::Into(_) => "Add files and folders",
     };
     let r = modal_rect(area, 100, area.height.saturating_sub(2));

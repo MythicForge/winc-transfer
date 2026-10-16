@@ -481,10 +481,7 @@ impl TuiApp {
                 }
             }
             Msg::SelectAll(on) => self.sources.iter_mut().for_each(|g| g.selected = on),
-            Msg::Pick(into) => {
-                let dirs_only = into == PickInto::Sources;
-                self.open_picker(PickKind::Many { dirs_only }, PickFor::Into(into), None);
-            }
+            Msg::Pick(into) => self.open_picker(PickKind::Many { dirs_only: false }, PickFor::Into(into), None),
             Msg::Picked(into, found) => {
                 self.picking = false;
                 if let Some(found) = found {
@@ -1261,5 +1258,24 @@ pub(crate) mod tests {
         a.focus = PK_LIST.into();
         a.key(key(KeyCode::Esc));
         assert!(a.picker.is_none());
+    }
+
+    #[test]
+    fn user_transfer_adds_files_too() {
+        let (mut a, rx) = app();
+        let file = std::env::temp_dir().join(format!("winci-user-pick-{}.txt", std::process::id()));
+        std::fs::write(&file, b"hello").unwrap();
+        a.update(Msg::Pick(PickInto::Sources));
+        let p = a.picker.as_mut().unwrap();
+        assert_eq!(p.kind, PickKind::Many { dirs_only: false });
+        p.path.set(file.display().to_string());
+        p.submit_path();
+        assert_eq!(p.marked, vec![file.clone()]);
+        a.update(Msg::Picker(Pk::Confirm));
+        let found = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        a.update(found);
+        let g = a.sources.iter().find(|g| g.path.as_deref() == Some(file.display().to_string().as_str())).unwrap();
+        assert_eq!((g.kind.as_str(), g.bytes, g.selected), ("file", 5, true));
+        let _ = std::fs::remove_file(&file);
     }
 }
